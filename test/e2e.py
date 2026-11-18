@@ -38,7 +38,7 @@ async def main():
         ans = await B.evaluate("__qd.code()")
         if NORELAY:
             # offline: A = a PC without a webcam pastes the code that came from the phone
-            await A.click("#b-scan-answer"); await A.click("details summary")
+            await A.click("#b-scan-answer"); await A.click("#v-scan details summary")
             await A.fill("#t-paste", ans); await A.click("#b-paste")
             print("relay down -> manual fallback used")
         else:
@@ -73,6 +73,16 @@ async def main():
         await A.fill("#t-send", "https://example.com/テスト?q=1"); await A.click("#b-text")
         await B.wait_for_selector("#xfer a.btn", timeout=5000)
         print("text/URL received:", await B.get_attribute("#xfer a.btn", "href"), "| rel:", await B.get_attribute("#xfer a.btn", "rel"))
+        # auto-accept: B ticks the box, A sends, B must not need to tap
+        await B.check("#o-auto"); open("/tmp/auto.txt","w").write("auto")
+        await A.set_input_files("#f-send", "/tmp/auto.txt")
+        await B.wait_for_function("[...document.querySelectorAll('#xfer .item.done .n')].some(e => e.textContent.includes('auto.txt'))", timeout=10000)
+        print("auto-accept OK, incoming card hidden:", await B.is_hidden("#c-incoming"))
+        # Ctrl+V of a file on PC side (A)
+        await A.evaluate("""() => { const dt = new DataTransfer(); dt.items.add(new File(['pasted!'], 'clip.png', {type:'image/png'}));
+            document.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true})); }""")
+        await B.wait_for_function("[...document.querySelectorAll('#xfer .item.done .n')].some(e => e.textContent.includes('clip.png'))", timeout=10000)
+        print("paste-to-send OK")
         await b.close()
 try: asyncio.run(main())
 finally: srv.terminate()

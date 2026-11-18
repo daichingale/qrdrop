@@ -1,0 +1,37 @@
+# Connects two pages through the mock relay and saves screenshots of each screen (phone + PC sizes).
+import asyncio, os, subprocess, sys, time
+from playwright.async_api import async_playwright
+WEB = sys.argv[1]; OUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/shots"
+os.makedirs(OUT, exist_ok=True)
+srv = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "server.py"), WEB, "8767"]); time.sleep(1)
+async def main():
+    async with async_playwright() as p:
+        b = await p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"])
+        pc = await (await b.new_context(viewport={"width": 1280, "height": 860}, bypass_csp=True)).new_page()
+        ph = await (await b.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True, bypass_csp=True)).new_page()
+        for pg in (pc, ph): pg.on("pageerror", lambda e: print("ERR", e))
+        await pc.goto("http://localhost:8767/"); await pc.wait_for_function("window.__qd")
+        await ph.goto("http://localhost:8767/"); await ph.wait_for_function("window.__qd")
+        await ph.screenshot(path=f"{OUT}/1_phone_home.png", full_page=True)
+        await pc.screenshot(path=f"{OUT}/1_pc_home.png", full_page=True)
+        await pc.click("#b-host"); await pc.wait_for_selector("#show-qr svg")
+        await pc.wait_for_timeout(300); await pc.screenshot(path=f"{OUT}/2_pc_qr.png", full_page=True)
+        link = await pc.evaluate("document.querySelector('#show-qr svg') && __qd.code()")
+        url = await pc.evaluate("""async () => { const svg = document.querySelector('#show-qr svg').outerHTML; const img = new Image(); img.src='data:image/svg+xml;base64,'+btoa(svg); await img.decode(); const c=document.createElement('canvas'); c.width=c.height=700; c.getContext('2d').drawImage(img,0,0,700,700); return __qd.qr_decode_rgba(c.getContext('2d').getImageData(0,0,700,700).data,700,700); }""")
+        await ph.goto(url); await ph.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
+        await pc.wait_for_selector("#v-conn:not(.hidden)", timeout=15000); await pc.wait_for_timeout(1500)
+        await ph.screenshot(path=f"{OUT}/3_phone_conn.png", full_page=True)
+        await pc.screenshot(path=f"{OUT}/3_pc_conn.png", full_page=True)
+        open("/tmp/s1.bin", "wb").write(os.urandom(30_000_000)); open("/tmp/写真_2026.jpg", "wb").write(os.urandom(800_000))
+        await pc.set_input_files("#f-send", ["/tmp/s1.bin", "/tmp/写真_2026.jpg"])
+        await ph.wait_for_selector("#c-incoming:not(.hidden)"); await ph.screenshot(path=f"{OUT}/4_phone_incoming.png", full_page=True)
+        await ph.click("#b-accept"); await ph.wait_for_timeout(700)
+        await ph.screenshot(path=f"{OUT}/5_phone_progress.png", full_page=True)
+        await ph.wait_for_function("document.querySelectorAll('#xfer .item.done').length === 2", timeout=60000)
+        await ph.fill("#t-send", "https://example.com/abc"); await ph.click("#b-text")
+        await pc.wait_for_timeout(500)
+        await ph.screenshot(path=f"{OUT}/6_phone_done.png", full_page=True)
+        await pc.screenshot(path=f"{OUT}/6_pc_done.png", full_page=True)
+        await b.close()
+try: asyncio.run(main())
+finally: srv.terminate()
