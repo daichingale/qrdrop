@@ -1,18 +1,22 @@
 import asyncio, os, sys, time, subprocess, hashlib
 from playwright.async_api import async_playwright
 WEB = sys.argv[1]; SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 50_000_000
+LANES = int(sys.argv[3]) if len(sys.argv) > 3 else 4
+QUIET = "-q" in sys.argv
 srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "-d", WEB], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1)
 data = os.urandom(SIZE); open("/tmp/big.bin", "wb").write(data)
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"])
-        ctx = await b.new_context(accept_downloads=True)
-        A = await ctx.new_page(); B = await ctx.new_page()
+        b2 = await p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"])
+        ctx = await b.new_context(accept_downloads=True, bypass_csp=True)
+        ctx2 = await b2.new_context(accept_downloads=True, bypass_csp=True)
+        A = await ctx.new_page(); B = await ctx2.new_page()  # separate browser processes, like two phones
         for pg, n in ((A, "A"), (B, "B")):
-            pg.on("console", lambda m, n=n: print(n, "console:", m.text))
             pg.on("pageerror", lambda e, n=n: print(n, "ERR:", e))
             await pg.goto("http://localhost:8765/"); await pg.wait_for_function("window.__qd")
+        await A.evaluate(f"__qd.setLanes({LANES})")
         await A.click("#b-host")
         await A.wait_for_selector("#show-qr svg", timeout=10000)
         offer = await A.evaluate("__qd.code()")
@@ -32,6 +36,9 @@ async def main():
         await A.evaluate("c => __qd.acceptAnswer(c)", ans)
         await A.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
         await B.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
+        await A.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
+        await B.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
+        print("lanes:", await A.evaluate("__qd.lanes()"), await B.evaluate("__qd.lanes()"))
         sa = await A.text_content("#safety"); sb = await B.text_content("#safety")
         print("safety", sa, sb, sa == sb)
         await A.set_input_files("#f-send", "/tmp/big.bin")
@@ -39,17 +46,18 @@ async def main():
         t = time.time(); await B.click("#b-accept")
         await B.wait_for_selector("#xfer .item.done, #xfer .item.err", timeout=300000)
         dt = time.time() - t
-        print("B status:", await B.text_content("#xfer .item .m"), "| %.1f MB/s" % (SIZE/dt/1e6))
+        print("B status:", await B.text_content("#xfer .item .m"), "| wall %.1f MB/s" % (SIZE/dt/1e6))
         async with B.expect_download() as di:
             await B.click("#xfer .item button")
         d = await di.value; path = await d.path()
         print("download sha256 match:", hashlib.sha256(open(path,'rb').read()).digest() == hashlib.sha256(data).digest())
         # reverse direction small file
-        open("/tmp/small.txt","w").write("こんにちは")
-        await B.set_input_files("#f-send", "/tmp/small.txt")
+        open("/tmp/small.txt","w").write("こんにちは"); open("/tmp/empty.bin","wb").close(); open("/tmp/mid.bin","wb").write(os.urandom(3_000_001))
+        await B.set_input_files("#f-send", ["/tmp/small.txt", "/tmp/empty.bin", "/tmp/mid.bin"])
         await A.wait_for_selector("#c-incoming:not(.hidden)"); await A.click("#b-accept")
-        await A.wait_for_selector("#xfer .item.done", timeout=10000)
-        print("reverse:", await A.text_content("#xfer .item .m"))
+        await A.wait_for_function("document.querySelectorAll('#xfer .item.done').length === 3", timeout=20000)
+        await B.wait_for_function("document.querySelectorAll('#xfer .item.done').length === 4", timeout=20000)
+        print("reverse 3 files OK:", [await e.text_content() for e in await A.query_selector_all("#xfer .item .m")])
         await b.close()
 try: asyncio.run(main())
 finally: srv.terminate()

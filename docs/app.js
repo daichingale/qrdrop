@@ -3,10 +3,14 @@ import init, { pack_sdp, unpack_sdp, packed_kind, safety_code, qr_svg, qr_decode
 const $ = (id) => document.getElementById(id);
 const CHUNK = 64 * 1024;          // DataChannel message size
 const READ = 4 * 1024 * 1024;     // read files in 4 MB slices
-const HIGH = 8 * 1024 * 1024;     // pause sending above this buffered amount
-const LOW = 2 * 1024 * 1024;      // resume below this
+const HIGH = 4 * 1024 * 1024;     // per-lane: pause sending above this buffered amount
+const LOW = 1 * 1024 * 1024;      // per-lane: resume below this
+const HDR = 12;                   // chunk header: u32 file index + f64 byte offset
+let LANES = 4;                    // parallel connections (1 = main only)
 
 let pc = null, dc = null, role = null, myCode = '';
+let lanes = [];                   // open data channels used for file data (main + extra)
+let extra = [];                   // extra RTCPeerConnections negotiated over the main channel
 let scanMode = null, stream = null, scanTimer = null, detector = null;
 
 // ------------------------------------------------------------------ views
@@ -51,6 +55,7 @@ function wireChannel(ch) {
 
 async function startHost() {
   role = 'host';
+  LANES = Math.min(8, Math.max(1, Number($('o-lanes').value) || 4));
   pc = newPC();
   wireChannel(pc.createDataChannel('qd', { ordered: true }));
   await pc.setLocalDescription(await pc.createOffer());
@@ -99,7 +104,48 @@ function onConnected() {
   try { $('safety').textContent = safety_code(pc.localDescription.sdp, pc.remoteDescription.sdp); } catch { $('safety').textContent = '---'; }
   show('conn');
   if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
+  lanes = [dc];
+  if (role === 'host') for (let k = 1; k < LANES; k++) openLane(k).catch(() => {});
 }
+
+// ------------------------------------------------------------------ extra lanes
+// Extra connections are negotiated over the already-authenticated, encrypted main
+// channel, so no more QR scans are needed and the peer's DTLS fingerprints are
+// delivered just as safely as the first one.
+function addLane(ch) {
+  ch.binaryType = 'arraybuffer';
+  ch.bufferedAmountLowThreshold = LOW;
+  ch.onmessage = onMessage;
+  ch.onopen = () => { if (!lanes.includes(ch)) lanes.push(ch); updLanes(); };
+  ch.onclose = () => { lanes = lanes.filter((x) => x !== ch); updLanes(); if (busy) reset('切断されました'); };
+}
+function lanePC() {
+  const p = new RTCPeerConnection({ iceServers: $('o-stun').checked ? [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }] : [] });
+  extra.push(p);
+  return p;
+}
+async function openLane(k) {
+  const p = lanePC();
+  addLane(p.createDataChannel('lane' + k, { ordered: true }));
+  await p.setLocalDescription(await p.createOffer());
+  await gathered(p);
+  p._k = k;
+  send({ t: 'lane-offer', k, sdp: p.localDescription.sdp });
+}
+async function onLaneOffer(m) {
+  if (extra.length >= 8) return;
+  const p = lanePC();
+  p.ondatachannel = (e) => addLane(e.channel);
+  await p.setRemoteDescription({ type: 'offer', sdp: String(m.sdp) });
+  await p.setLocalDescription(await p.createAnswer());
+  await gathered(p);
+  send({ t: 'lane-answer', k: m.k, sdp: p.localDescription.sdp });
+}
+async function onLaneAnswer(m) {
+  const p = extra.find((x) => x._k === m.k && !x.remoteDescription);
+  if (p) await p.setRemoteDescription({ type: 'answer', sdp: String(m.sdp) });
+}
+function updLanes() { const el = $('lanes'); if (el) el.textContent = lanes.length > 1 ? `並列 ${lanes.length} 本で高速転送` : ''; }
 
 // ------------------------------------------------------------------ scanning
 async function startScan(mode) {
@@ -160,11 +206,15 @@ async function handleCode(txt) {
 function scanErr(m) { $('e-scan').textContent = m; $('e-scan').classList.remove('hidden'); }
 
 // ------------------------------------------------------------------ transfer protocol
-// text: {t:'offer',files:[{name,size,type}]} | {t:'accept'} | {t:'reject'} | {t:'file',i} | {t:'done',i,hash}
-// binary: file chunks, in order
+// text (main channel): {t:'offer',files} | {t:'accept'} | {t:'reject'} | {t:'done',i,hash} | {t:'ack',i,ok}
+//                      {t:'lane-offer',k,sdp} | {t:'lane-answer',k,sdp}
+// binary (any lane):   [u32 file index][f64 byte offset][data]  — spread over all lanes,
+//                      put back in order on the receiver before hashing.
 let outQueue = null;      // files waiting for accept
 let inOffer = null;       // incoming offer
-let rx = null;            // current receiving file state
+let rxs = new Map();      // file index -> receive state
+let rxDone = 0;
+let sending = null;       // files being sent (for acks)
 let busy = false;
 
 function send(o) { dc.send(JSON.stringify(o)); }
@@ -181,40 +231,51 @@ function offerFiles(files) {
 
 function alert2(m) { const p = document.createElement('p'); p.className = 'err'; p.textContent = m; $('drop').after(p); setTimeout(() => p.remove(), 3000); }
 
-function waitLow() {
+// pick the open lane with the least queued data; wait if all are full
+function pickLane() {
+  let best = null;
+  for (const l of lanes) if (l.readyState === 'open' && (!best || l.bufferedAmount < best.bufferedAmount)) best = l;
+  if (!best) return Promise.reject(new Error('closed'));
+  if (best.bufferedAmount < HIGH) return best;
   return new Promise((res) => {
-    if (dc.bufferedAmount < HIGH) return res();
-    const h = () => { dc.removeEventListener('bufferedamountlow', h); res(); };
-    dc.addEventListener('bufferedamountlow', h);
+    const hs = [];
+    const done = (l) => { hs.forEach(([x, h]) => x.removeEventListener('bufferedamountlow', h)); res(l); };
+    for (const l of lanes) { const h = () => done(l); hs.push([l, h]); l.addEventListener('bufferedamountlow', h); }
   });
 }
 
 async function sendAll() {
   busy = true;
-  const files = outQueue; outQueue = null;
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i], ui = f._ui, h = new Hasher();
-    send({ t: 'file', i });
-    const t0 = performance.now(); let sent = 0;
-    // prefetch next slice while sending current one
-    let next = f.slice(0, READ).arrayBuffer();
-    for (let off = 0; off < f.size; off += READ) {
-      const buf = new Uint8Array(await next);
-      if (off + READ < f.size) next = f.slice(off + READ, off + 2 * READ).arrayBuffer();
-      h.update(buf);
-      for (let p = 0; p < buf.length; p += CHUNK) {
-        if (dc.bufferedAmount >= HIGH) await waitLow();
-        if (dc.readyState !== 'open') { ui.err('切断されました'); busy = false; return; }
-        dc.send(buf.subarray(p, Math.min(p + CHUNK, buf.length)));
+  const files = outQueue; outQueue = null; sending = files;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i], ui = f._ui, h = new Hasher();
+      f._t0 = performance.now(); let sent = 0;
+      let next = f.slice(0, READ).arrayBuffer();           // prefetch next slice while sending
+      for (let off = 0; off < f.size; off += READ) {
+        const buf = new Uint8Array(await next);
+        if (off + READ < f.size) next = f.slice(off + READ, off + 2 * READ).arrayBuffer();
+        h.update(buf);
+        for (let p = 0; p < buf.length; p += CHUNK) {
+          const n = Math.min(CHUNK, buf.length - p);
+          const msg = new Uint8Array(HDR + n);
+          const dv = new DataView(msg.buffer);
+          dv.setUint32(0, i); dv.setFloat64(4, off + p);
+          msg.set(buf.subarray(p, p + n), HDR);
+          let l = pickLane(); if (l instanceof Promise) l = await l;
+          l.send(msg);
+        }
+        sent += buf.length;
+        ui.prog(sent, f._t0);
       }
-      sent += buf.length;
-      ui.prog(sent, t0);
+      send({ t: 'done', i, hash: h.finalize_hex() });
+      h.free();
+      ui.wait('相手の検証待ち…');
     }
-    send({ t: 'done', i, hash: h.finalize_hex() });
-    h.free();
-    ui.ok('送信完了');
+  } catch (e) {
+    for (const f of files) f._ui.err('切断されました');
+    busy = false; sending = null;
   }
-  busy = false;
 }
 
 function onMessage(e) {
@@ -233,33 +294,68 @@ function onMessage(e) {
   } else if (m.t === 'reject' && outQueue) {
     for (const f of outQueue) f._ui.err('相手が断りました');
     outQueue = null;
-  } else if (m.t === 'file' && inOffer && inOffer[m.i]) {
-    const f = inOffer[m.i];
-    rx = { f, parts: [], pend: [], pendSize: 0, got: 0, h: new Hasher(), t0: performance.now(), ui: f._ui };
-  } else if (m.t === 'done' && rx) {
-    finishRx(m.hash);
-    if (m.i === inOffer.length - 1) { inOffer = null; busy = false; }
+  } else if (m.t === 'done' && inOffer && inOffer[m.i]) {
+    const s = rxState(m.i); if (!s) return;
+    s.hash = String(m.hash); tryFinish(m.i, s);
+  } else if (m.t === 'ack' && sending && sending[m.i]) {
+    const f = sending[m.i];
+    if (f._acked) return;
+    if (m.ok) { f._ui.prog(f.size, f._t0); f._ui.ok('送信完了 · 相手で検証OK · ' + fmt(f.size / ((performance.now() - f._t0) / 1000)) + '/s'); }
+    else f._ui.err('相手側で検証に失敗しました');
+    if (f._acked) return; f._acked = true;
+    if ((sending._acks = (sending._acks || 0) + 1) >= sending.length) { sending = null; busy = false; }
+  } else if (m.t === 'lane-offer') {
+    onLaneOffer(m).catch(() => {});
+  } else if (m.t === 'lane-answer') {
+    onLaneAnswer(m).catch(() => {});
   }
 }
 
-function onChunk(buf) {
-  if (!rx) return;
-  const u = new Uint8Array(buf);
-  rx.h.update(u);
-  rx.pend.push(u); rx.pendSize += u.length; rx.got += u.length;
-  if (rx.pendSize >= 16 * 1024 * 1024) { rx.parts.push(new Blob(rx.pend)); rx.pend = []; rx.pendSize = 0; }
-  if (!rx.lastUi || performance.now() - rx.lastUi > 150) { rx.ui.prog(rx.got, rx.t0); rx.lastUi = performance.now(); }
+function rxState(i) {
+  if (!inOffer || !inOffer[i]) return null;
+  let s = rxs.get(i);
+  if (!s) {
+    if (inOffer[i]._fin) return null;
+    s = { f: inOffer[i], parts: [], pend: [], pendSize: 0, next: 0, ooo: new Map(), h: new Hasher(), t0: performance.now(), ui: inOffer[i]._ui, hash: null };
+    rxs.set(i, s);
+  }
+  return s;
 }
 
-function finishRx(hash) {
-  const { f, h, ui } = rx;
-  rx.parts.push(new Blob(rx.pend));
+function onChunk(buf) {
+  if (buf.byteLength < HDR) return;
+  const dv = new DataView(buf);
+  const i = dv.getUint32(0), off = dv.getFloat64(4);
+  const s = rxState(i); if (!s) return;
+  const u = new Uint8Array(buf, HDR);
+  if (off !== s.next) {                     // arrived early on a faster lane: park it
+    if (off > s.next && off < s.f.size) s.ooo.set(off, u);
+    return;
+  }
+  take(s, u);
+  let nx;
+  while ((nx = s.ooo.get(s.next))) { s.ooo.delete(s.next); take(s, nx); }
+  if (!s.lastUi || performance.now() - s.lastUi > 150) { s.ui.prog(s.next, s.t0); s.lastUi = performance.now(); }
+  tryFinish(i, s);
+}
+function take(s, u) {
+  s.h.update(u);
+  s.pend.push(u); s.pendSize += u.length; s.next += u.length;
+  if (s.pendSize >= 16 * 1024 * 1024) { s.parts.push(new Blob(s.pend)); s.pend = []; s.pendSize = 0; }
+}
+
+function tryFinish(i, s) {
+  if (s.hash === null || s.next < s.f.size) return;
+  const { f, h, ui } = s;
+  s.parts.push(new Blob(s.pend));
   const mine = h.finalize_hex(); h.free();
-  const blob = new Blob(rx.parts, { type: f.type || 'application/octet-stream' });
-  rx = null;
-  if (mine !== hash || blob.size !== f.size) return ui.err('データが壊れています（検証失敗）。破棄しました');
-  ui.prog(f.size, null);
-  ui.ok('受信完了 · 検証OK', blob, f.name);
+  const blob = new Blob(s.parts, { type: f.type || 'application/octet-stream' });
+  rxs.delete(i); f._fin = true;
+  const ok = mine === s.hash && blob.size === f.size;
+  send({ t: 'ack', i, ok });
+  if (ok) { ui.prog(f.size, null); ui.ok('受信完了 · 検証OK · ' + fmt(f.size / ((performance.now() - s.t0) / 1000)) + '/s', blob, f.name); }
+  else ui.err('データが壊れています（検証失敗）。破棄しました');
+  if (++rxDone >= inOffer.length) { inOffer = null; rxDone = 0; busy = false; }
 }
 
 function addItem(name, size, msg) {
@@ -287,6 +383,7 @@ function addItem(name, size, msg) {
         acts.append(b2);
       }
     },
+    wait(m) { st.textContent = m; },
     err(m) { el.classList.add('err'); st.textContent = m; },
   };
 }
@@ -297,7 +394,9 @@ function reset(msg) {
   stopScan();
   try { dc && dc.close(); } catch {}
   try { pc && pc.close(); } catch {}
-  pc = dc = null; role = null; outQueue = inOffer = rx = null; busy = false;
+  for (const p of extra) { try { p.close(); } catch {} }
+  extra = []; lanes = [];
+  pc = dc = null; role = null; outQueue = inOffer = sending = null; rxs = new Map(); rxDone = 0; busy = false;
   $('xfer').innerHTML = ''; $('c-xfer').classList.add('hidden'); $('c-incoming').classList.add('hidden');
   show('home');
   const e = $('e-core');
@@ -340,4 +439,4 @@ async function main() {
 main();
 
 // test hook (used by automated tests only)
-window.__qd = { startHost, acceptOffer: (c) => acceptOffer(c), acceptAnswer: (c) => acceptAnswer(c), code: () => myCode, offerFiles, qr_svg, qr_decode_rgba };
+window.__qd = { setLanes: (n) => { $('o-lanes').innerHTML += `<option value="${n}">${n}</option>`; $('o-lanes').value = String(n); }, lanes: () => lanes.length, startHost, acceptOffer: (c) => acceptOffer(c), acceptAnswer: (c) => acceptAnswer(c), code: () => myCode, offerFiles, qr_svg, qr_decode_rgba };
