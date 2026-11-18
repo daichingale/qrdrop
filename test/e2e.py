@@ -9,11 +9,17 @@ time.sleep(1)
 data = os.urandom(SIZE); open("/tmp/big.bin", "wb").write(data)
 async def main():
     async with async_playwright() as p:
-        b = await p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"])
-        b2 = await p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"])
-        ctx = await b.new_context(accept_downloads=True, bypass_csp=True)
-        ctx2 = await b2.new_context(accept_downloads=True, bypass_csp=True)
-        A = await ctx.new_page(); B = await ctx2.new_page()  # separate browser processes, like two phones
+        import tempfile
+        # persistent (on-disk) profiles like a real browser; incognito-style contexts keep OPFS in memory
+        kw = dict(executable_path="/usr/bin/google-chrome", args=["--disable-features=WebRtcHideLocalIpsWithMdns"], accept_downloads=True, bypass_csp=True)
+        if os.environ.get("INCOG") == "1":   # incognito-style contexts: OPFS in memory with a cap
+            bb = await p.chromium.launch(executable_path=kw["executable_path"], args=kw["args"])
+            ctx = await bb.new_context(accept_downloads=True, bypass_csp=True); ctx2 = await bb.new_context(accept_downloads=True, bypass_csp=True)
+        else:
+            ctx = await p.chromium.launch_persistent_context(tempfile.mkdtemp(), **kw)
+            ctx2 = await p.chromium.launch_persistent_context(tempfile.mkdtemp(), **kw)
+        b = ctx
+        A = ctx.pages[0] if ctx.pages else await ctx.new_page(); B = ctx2.pages[0] if ctx2.pages else await ctx2.new_page()  # separate browser processes, like two phones
         for pg, n in ((A, "A"), (B, "B")):
             pg.on("pageerror", lambda e, n=n: print(n, "ERR:", e))
         await A.goto("http://localhost:8765/"); await A.wait_for_function("window.__qd")
@@ -58,6 +64,7 @@ async def main():
         t = time.time(); await B.click("#b-accept")
         await B.wait_for_selector("#xfer .item.done, #xfer .item.err", timeout=300000)
         dt = time.time() - t
+        print("estimate:", await B.evaluate("navigator.storage.estimate()"), "| last:", await B.evaluate("window.__qdLast"))
         print("B status:", await B.text_content("#xfer .item .m"), "| wall %.1f MB/s" % (SIZE/dt/1e6))
         async with B.expect_download() as di:
             await B.click("#xfer .item button")
@@ -83,6 +90,14 @@ async def main():
             document.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true})); }""")
         await B.wait_for_function("[...document.querySelectorAll('#xfer .item.done .n')].some(e => e.textContent.includes('clip.png'))", timeout=10000)
         print("paste-to-send OK")
-        await b.close()
+        # free-space check: B pretends to have only 1 MB free
+        await B.uncheck("#o-auto")
+        await B.evaluate("navigator.storage.estimate = async () => ({ quota: 2e6, usage: 1e6 })")
+        open("/tmp/toobig.bin","wb").write(os.urandom(5_000_000))
+        await A.set_input_files("#f-send", "/tmp/toobig.bin")
+        await B.wait_for_selector("#c-incoming:not(.hidden)"); await B.click("#b-accept")
+        await A.wait_for_function("[...document.querySelectorAll('#xfer .item.err .m')].some(e => e.textContent.includes('断りました'))", timeout=10000)
+        print("free-space check: B says:", (await B.text_content("#drop + p.err"))[:40], "| A sees reject: True")
+        await ctx.close(); await ctx2.close()
 try: asyncio.run(main())
 finally: srv.terminate()

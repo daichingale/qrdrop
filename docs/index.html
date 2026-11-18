@@ -50,6 +50,15 @@ details.card .opt:first-of-type{margin-top:12px}
 .opt input[type=checkbox]{width:20px;height:20px;margin:2px 0 0;accent-color:var(--acc)}
 select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:14px}
 
+.peer{display:flex;gap:8px;align-items:stretch}
+.peer+.peer{margin-top:8px}
+.peer-btn{flex:1;display:flex;flex-direction:column;align-items:flex-start;text-align:left;padding:12px 14px}
+.peer-btn small{color:var(--mut);font-weight:400;font-size:12px}
+.peer .sm{flex:none}
+.txtin{width:9.5em;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:14px}
+.resume{display:flex;align-items:center;gap:12px;border-color:var(--acc)}
+.resume .t{flex:1;font-size:14px}
+.resume button{width:auto}
 /* QR / scan */
 .qr{background:#fff;border-radius:14px;padding:10px;width:min(80vw,360px);margin:4px auto 14px}
 .qr svg{display:block;width:100%;height:auto}
@@ -113,6 +122,11 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
 
   <!-- HOME -->
   <section id="v-home">
+    <div class="card hidden" id="c-peers">
+      <h2>つないだことのある端末</h2>
+      <div id="peer-list"></div>
+      <p style="margin-top:10px;font-size:12.5px">名前を押すとQRなしでつながります。相手の端末でもQRDropを開いておいてください。</p>
+    </div>
     <div class="card">
       <div class="stack">
         <button id="b-host">接続を開始（QRを表示）</button>
@@ -129,6 +143,9 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
       <label class="opt"><span class="t">別のネットワーク同士でも試す<small>STUNで経路だけ調べます。データは端末間で直接のまま。オフのときは同じWi-Fiかテザリングで使えます</small></span><input type="checkbox" id="o-stun"></label>
       <label class="opt"><span class="t">並列接続数<small>「接続を開始」側の設定が使われます。転送後の速度を見て一番速い本数を選んでください</small></span>
         <select id="o-lanes"><option value="1">1本</option><option value="2">2本</option><option value="4" selected>4本</option><option value="6">6本</option></select></label>
+      <label class="opt"><span class="t">この端末の名前<small>相手の画面の「つないだことのある端末」に出る名前です</small></span><input id="o-name" maxlength="40" class="txtin"></label>
+      <label class="opt"><span class="t">つないだ端末を記憶する<small>次回から名前を押すだけでつながります。合鍵はこの端末の中にだけ保存されます</small></span><input type="checkbox" id="o-remember" checked></label>
+      <div class="opt"><span class="t"><span id="st-usage">受信データの一時保存：確認中…</span><small>途中で切れたファイルを続きから受け取るために保存しています</small></span><button class="sec sm hidden" id="b-clear">削除</button></div>
     </details>
     <p class="err hidden" id="e-core"></p>
   </section>
@@ -171,8 +188,12 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
   <section id="v-conn" class="hidden">
     <div class="card conn">
       <span class="dot"></span>
-      <div class="t"><b>接続中</b><small>相手と同じ数字なら安全</small><small id="lanes"></small></div>
+      <div class="t"><b id="peer-name">接続中</b><small>相手と同じ数字なら安全</small><small id="lanes"></small></div>
       <div class="code" id="safety"></div>
+    </div>
+    <div class="card hidden resume" id="c-resume">
+      <span class="t" id="resume-text"></span>
+      <button class="sm" id="b-resume">続きを送る</button>
     </div>
     <div class="card">
       <label class="drop" id="drop" for="f-send">

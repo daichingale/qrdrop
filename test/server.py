@@ -17,17 +17,19 @@ class H(SimpleHTTPRequestHandler):
         s.send_response(200); s.send_header("Content-Type", "application/json"); s.end_headers(); s.wfile.write(b"{}")
     def do_GET(s):
         if s.path.startswith("/relay/") and "/sse" in s.path:
-            t = s.path.split("/")[2]
+            topics = s.path.split("/")[2].split(",")
+            since_all = "since=all" in s.path
             s.send_response(200); s.send_header("Content-Type", "text/event-stream"); s.send_header("Cache-Control", "no-cache"); s.end_headers()
-            sent = 0
+            with cond: sent = {t: (0 if since_all else len(msgs.get(t, []))) for t in topics}
             try:
-                s.wfile.write(b'data: {"event":"open"}\n\n'); s.wfile.flush()
+                s.wfile.write(b'event: open\ndata: {"event":"open"}\n\n'); s.wfile.flush()
                 while True:
                     with cond:
                         cond.wait(timeout=1)
-                        new = msgs.get(t, [])[sent:]
-                    for m in new:
-                        s.wfile.write(("data: " + json.dumps({"event": "message", "message": m}) + "\n\n").encode()); s.wfile.flush(); sent += 1
+                        new = [(t, m) for t in topics for m in msgs.get(t, [])[sent[t]:]]
+                        for t in topics: sent[t] = len(msgs.get(t, []))
+                    for t, m in new:
+                        s.wfile.write(("data: " + json.dumps({"event": "message", "topic": t, "message": m}) + "\n\n").encode()); s.wfile.flush()
             except Exception: return
         return super().do_GET()
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
