@@ -23,7 +23,7 @@ async def main():
         for pg, n in ((A, "A"), (B, "B")):
             pg.on("pageerror", lambda e, n=n: print(n, "ERR:", e))
         await A.goto("http://localhost:8765/"); await A.wait_for_function("window.__qd")
-        await A.evaluate(f"__qd.setLanes({LANES})")
+        if LANES: await A.evaluate(f"__qd.setLanes({LANES})")
         await A.click("#b-host")
         await A.wait_for_selector("#show-qr svg", timeout=10000)
         offer = await A.evaluate("__qd.code()")
@@ -54,8 +54,8 @@ async def main():
             log = open("/tmp/relay_log.txt").read()
             print("relay saw plaintext SDP/IP/fingerprint?:", any(x in log for x in ("QD1", "192.", "candidate", ans[:20])), "| bytes:", len(log.strip()))
         await B.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
-        await A.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
-        await B.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
+        await A.wait_for_function(f"__qd.lanes() >= {LANES or 4}", timeout=15000)
+        await B.wait_for_function(f"__qd.lanes() >= {LANES or 4}", timeout=15000)
         print("lanes:", await A.evaluate("__qd.lanes()"), await B.evaluate("__qd.lanes()"))
         sa = await A.text_content("#safety"); sb = await B.text_content("#safety")
         print("safety", sa, sb, sa == sb)
@@ -69,6 +69,7 @@ async def main():
         async with B.expect_download() as di:
             await B.click("#xfer .item button")
         d = await di.value; path = await d.path()
+        print("lane info A:", await A.text_content("#lanes"), "| tuned:", await A.evaluate("Object.entries(localStorage).filter(([k]) => k.startsWith('qd-lanes:')).map(([k,v]) => v)"))
         print("download sha256 match:", hashlib.sha256(open(path,'rb').read()).digest() == hashlib.sha256(data).digest())
         # reverse direction small file
         open("/tmp/small.txt","w").write("こんにちは"); open("/tmp/empty.bin","wb").close(); open("/tmp/mid.bin","wb").write(os.urandom(3_000_001))

@@ -15,12 +15,13 @@ const fname = (id) => safe(id) + '.part';
 // or reload, anything past this checkpoint might not have reached the disk, so resume from here.
 const mname = (id) => safe(id) + '.ok';
 const dname = (id) => safe(id) + '.done';   // marks a fully received file (kept only until the user leaves this connection)
-function writeMark(m, n) { const b = new DataView(new ArrayBuffer(8)); b.setFloat64(0, n); m.write(new Uint8Array(b.buffer), { at: 0 }); m.flush(); }
-function checkpoint(s) {
-  s.h.flush();
+// (getSize/truncate/flush/close are awaited: some Safari/Chrome versions return promises for them)
+async function writeMark(m, n) { const b = new DataView(new ArrayBuffer(8)); b.setFloat64(0, n); m.write(new Uint8Array(b.buffer), { at: 0 }); await m.flush(); }
+async function checkpoint(s) {
+  await s.h.flush();
   // some storage (e.g. incognito, kept in memory with a cap) can drop writes without an error
-  if (s.h.getSize() < s.size) throw new Error('short write: storage full');
-  writeMark(s.m, s.size); s.unflushed = 0;
+  if ((await s.h.getSize()) < s.size) throw new Error('short write: storage full');
+  await writeMark(s.m, s.size); s.unflushed = 0;
 }
 // Right after a reload the previous page's worker may still hold the file lock for a moment.
 async function retry(fn, ms = 4000) {
@@ -41,7 +42,7 @@ async function probeSupport() {
     const d = await root();
     const fh = await d.getFileHandle('.probe', { create: true });
     const h = await fh.createSyncAccessHandle();
-    h.close();
+    await h.close();
     await d.removeEntry('.probe');
     return true;
   } catch { return false; }
@@ -69,8 +70,8 @@ const ops = {
     const mark = await readMark(d, id);
     const h = await retry(async () => (await d.getFileHandle(fname(id), { create: true })).createSyncAccessHandle());
     const m = await retry(async () => (await d.getFileHandle(mname(id), { create: true })).createSyncAccessHandle());
-    from = Math.min(from, h.getSize(), mark);
-    h.truncate(from); h.flush(); writeMark(m, from);
+    from = Math.min(from, await h.getSize(), mark);
+    await h.truncate(from); await h.flush(); await writeMark(m, from);
     const hasher = new Hasher();
     const buf = new Uint8Array(8 * 1024 * 1024);
     for (let at = 0; at < from;) {
@@ -83,7 +84,7 @@ const ops = {
     return { from };
   },
 
-  write({ id, off, buf, pos }) {
+  async write({ id, off, buf, pos }) {
     const s = open.get(id);
     if (!s) throw new Error('not open');
     if (off !== s.size) throw new Error(`gap ${off} != ${s.size}`);
@@ -92,17 +93,17 @@ const ops = {
     let w = 0;
     while (w < data.length) w += s.h.write(data.subarray(w), { at: off + w });
     s.size += data.length;
-    if ((s.unflushed += data.length) >= FLUSH_EVERY) checkpoint(s);
+    if ((s.unflushed += data.length) >= FLUSH_EVERY) await checkpoint(s);
     return undefined;   // no reply needed
   },
 
   async finish({ id }) {
     const s = open.get(id);
     if (!s) throw new Error('not open');
-    checkpoint(s);
+    await checkpoint(s);
     const hash = s.hasher.finalize_hex();
-    const size = s.h.getSize();
-    s.h.close(); s.m.close(); s.hasher.free(); open.delete(id);
+    const size = await s.h.getSize();
+    await s.h.close(); await s.m.close(); s.hasher.free(); open.delete(id);
     try { await (await (await root()).getFileHandle(dname(id), { create: true })).getFile(); } catch {}
     return { hash, size };
   },
@@ -110,7 +111,7 @@ const ops = {
   // stop writing; keep the partial file for a later resume unless del is set
   async close({ id, del }) {
     const s = open.get(id);
-    if (s) { try { checkpoint(s); } catch {} try { s.h.close(); s.m.close(); } catch {} s.hasher.free(); open.delete(id); }
+    if (s) { try { await checkpoint(s); } catch {} try { await s.h.close(); await s.m.close(); } catch {} s.hasher.free(); open.delete(id); }
     if (del) { const d = await root(); for (const n of [fname(id), mname(id), dname(id)]) { try { await d.removeEntry(n); } catch {} } }
     return true;
   },

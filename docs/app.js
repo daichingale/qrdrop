@@ -3,12 +3,21 @@ import { initStore, canResume, probe, openSink, fileId, usage, clearAll, closeAl
 import { listPeers, savePeer, deletePeer, touchPeer, myId, myName, setMyName, newPairKey, peerRecord, seal, unseal, b64u, unb64u } from './peers.js';
 
 const $ = (id) => document.getElementById(id);
+const UA = navigator.userAgent;
+const IOS = /iPhone|iPad|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const ANDROID = /Android/.test(UA);
+const STANDALONE = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const EXT_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif',
+  mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', '3gp': 'video/3gpp', webm: 'video/webm', mkv: 'video/x-matroska', pdf: 'application/pdf' };
+const guessType = (name, type) => type || EXT_TYPES[(/\.([a-z0-9]+)$/i.exec(name) || [])[1]?.toLowerCase()] || '';
 const CHUNK = 64 * 1024;          // DataChannel message size
 const READ = 4 * 1024 * 1024;     // read files in 4 MB slices
 const HIGH = 4 * 1024 * 1024;     // per-lane: pause sending above this buffered amount
 const LOW = 1 * 1024 * 1024;      // per-lane: resume below this
 const HDR = 16;                   // chunk header: u32 batch id + u32 file index + f64 byte offset
-let LANES = 4;                    // parallel connections (1 = main only)
+let LANES = 4;                    // parallel connections opened (1 = main only)
+let ACTIVE = 0;                   // lanes actually used for data (0 = all); tuned automatically per device pair
+const noNet = () => $('o-nonet').checked || !navigator.onLine;
 
 let pc = null, dc = null, role = null, myCode = '';
 let lanes = [];                   // open data channels used for file data (main + extra)
@@ -30,23 +39,28 @@ function fmt(n) {
   return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-const iceServers = () => ($('o-stun').checked ? [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }] : []);
+// STUN only tells each device its public address (helps iPhone↔Android and Wi-Fi↔mobile data); file data stays direct.
+const iceServers = () => (noNet() ? [] : [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }]);
 
 // ------------------------------------------------------------------ WebRTC setup
 function newPC() {
   const p = new RTCPeerConnection({ iceServers: iceServers() });
   p.onconnectionstatechange = () => {
     const s = p.connectionState;
-    if (s === 'failed') fail('接続できませんでした。同じWi-Fiか確認するか、STUNをオンにして試してください。');
-    if (s === 'disconnected' || s === 'closed') { if (!$('v-conn').classList.contains('hidden')) setTimeout(() => { if (p === pc && p.connectionState !== 'connected') reset('切断されました。受信済みの部分は保存されているので、もう一度つなぐと続きから送れます。'); }, 3000); }
+    if (s === 'failed') fail(noNet() ? '接続できませんでした。2台が同じWi-Fi（またはテザリング）につながっているか確認してください。' : '接続できませんでした。2台を同じWi-Fiにつなぐか、片方のテザリングにもう片方をつないで試してください。');
+    if (s === 'disconnected' || s === 'closed') { if (!$('v-conn').classList.contains('hidden')) setTimeout(() => { if (p === pc && p.connectionState !== 'connected') reset('切断されました。受信済みの部分は保存されているので、もう一度つなぐと続きから送れます。', true); }, 3000); }
   };
   return p;
 }
+// Wait for ICE candidates (we send them all at once inside the QR/link). Stop early once a STUN
+// (srflx) candidate shows up, since by then the host candidates are in too; cap the wait otherwise.
 function gathered(p) {
   return new Promise((res) => {
     if (p.iceGatheringState === 'complete') return res();
-    const t = setTimeout(res, $('o-stun').checked ? 4000 : 2500);
-    p.addEventListener('icegatheringstatechange', () => { if (p.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    let done = false; const fin = () => { if (!done) { done = true; clearTimeout(t); res(); } };
+    const t = setTimeout(fin, noNet() ? 1500 : 2500);
+    p.addEventListener('icegatheringstatechange', () => { if (p.iceGatheringState === 'complete') fin(); });
+    p.addEventListener('icecandidate', (e) => { if (e.candidate && / typ srflx/.test(e.candidate.candidate)) setTimeout(fin, 250); });
   });
 }
 function wireChannel(ch) {
@@ -55,7 +69,7 @@ function wireChannel(ch) {
   dc.bufferedAmountLowThreshold = LOW;
   dc.onopen = onConnected;
   dc.onmessage = onMessage;
-  dc.onclose = () => { if (ch === dc) reset('切断されました。受信済みの部分は保存されているので、もう一度つなぐと続きから送れます。'); };
+  dc.onclose = () => { if (ch === dc) reset('切断されました。受信済みの部分は保存されているので、もう一度つなぐと続きから送れます。', true); };
 }
 
 async function startHost() {
@@ -84,16 +98,18 @@ async function startHost() {
 // peerName: set when the offer came from a remembered device (no QR shown at all).
 async function acceptOffer(code, deliver, peerName) {
   role = 'guest';
-  pc = newPC();
-  pc.ondatachannel = (e) => wireChannel(e.channel);
-  await pc.setRemoteDescription({ type: 'offer', sdp: unpack_sdp(code) });
-  await pc.setLocalDescription(await pc.createAnswer());
+  const mine = pc = newPC();
+  mine.ondatachannel = (e) => { if (pc === mine) wireChannel(e.channel); };
+  await mine.setRemoteDescription({ type: 'offer', sdp: unpack_sdp(code) });
+  await mine.setLocalDescription(await mine.createAnswer());
+  if (pc !== mine) return;
   showQR(peerName ? `${esc(peerName)}とつないでいます…` : '<span class="step">2</span>つないでいます…', '', !peerName);
   $('b-scan-answer').classList.add('hidden');
   $('b-copy').textContent = 'コードをコピー（カメラが使えない時）';
   $('show-status').textContent = '接続情報を準備中…';
-  await gathered(pc);
-  try { myCode = pack_sdp(pc.localDescription.sdp, false); }
+  await gathered(mine);
+  if (pc !== mine) return;
+  try { myCode = pack_sdp(mine.localDescription.sdp, false); }
   catch (e) { return fail('ネットワークが見つかりません。Wi-Fiかテザリングに接続してください。'); }
   myLink = myCode;
   if (deliver) {
@@ -131,16 +147,16 @@ function renderQR(text) { $('show-qr').innerHTML = qr_svg(text); }
 
 // The code and the one-time key ride in the URL fragment (#…), which browsers never send to any server.
 function joinUrl(code, key) {
-  return location.origin + location.pathname + '#c=' + encodeURIComponent(code) + '&k=' + b64u(key) + ($('o-stun').checked ? '&s=1' : '');
+  return location.origin + location.pathname + '#c=' + encodeURIComponent(code) + '&k=' + b64u(key) + ($('o-nonet').checked ? '&n=1' : '');
 }
 function parseJoin(txt) {
   txt = String(txt || '').trim();
   const i = txt.indexOf('#c=');
-  if (i < 0) return { code: txt, key: null, stun: false };
+  if (i < 0) return { code: txt, key: null, nonet: false };
   const p = new URLSearchParams(txt.slice(i + 1));
   let key = null;
   try { const k = unb64u(p.get('k') || ''); if (k.length === 16) key = k; } catch {}
-  return { code: p.get('c') || '', key, stun: p.get('s') === '1' };
+  return { code: p.get('c') || '', key, nonet: p.get('n') === '1' };
 }
 
 // ------------------------------------------------------------------ encrypted relay for the reply
@@ -189,6 +205,29 @@ function stopRelay() { if (relayES) { relayES.close(); relayES = null; } }
 
 // ------------------------------------------------------------------ remembered devices
 let peers = [], peerES = null, invite = null, inviteTimer = null;
+// automatic reconnect after a drop (e.g. an iPhone screen locked mid-transfer): both sides retry,
+// and whichever comes back first reconnects; the rest of the files then resume automatically.
+let autoPeer = null, autoTimer = null, autoTries = 0, autoResumed = false;
+const acceptedIds = new Set();    // file ids accepted in this session: re-offers of these are taken automatically
+const AUTO_DELAYS = [1500, 3000, 6000, 10000, 15000, 20000, 30000, 30000, 45000, 60000, 60000, 60000, 60000, 60000, 60000];
+function info(m) { const e = $('i-core'); e.textContent = m || ''; e.classList.toggle('hidden', !m); }
+function stopAuto() { autoPeer = null; clearTimeout(autoTimer); autoTries = 0; info(''); }
+function scheduleAuto() {
+  clearTimeout(autoTimer);
+  if (!autoPeer) return;
+  if (autoTries >= AUTO_DELAYS.length) { const p = peers.find((x) => x.id === autoPeer); stopAuto(); info(''); $('e-core').textContent = `${p ? p.name : '相手'}に再接続できませんでした。相手の端末でQRDropを開いて、名前を押してください。`; $('e-core').classList.remove('hidden'); return; }
+  autoTimer = setTimeout(tryAuto, AUTO_DELAYS[autoTries]);
+}
+function tryAuto() {
+  if (!autoPeer || pc) return;
+  if (document.hidden) return;                       // resumes on visibilitychange
+  const p = peers.find((x) => x.id === autoPeer);
+  if (!p) return stopAuto();
+  autoTries++;
+  $('e-core').classList.add('hidden');
+  info(`${p.name}に自動で再接続しています…（相手の画面でもQRDropを開いてください）`);
+  connectPeer(p, true).catch(() => { if (!pc) scheduleAuto(); });
+}
 const seen = new Set();
 async function refreshPeers() {
   peers = await listPeers();
@@ -225,9 +264,10 @@ function peerListen() {
     seen.add(key);
     if (o.k === 'offer') {
       if (dc && dc.readyState === 'open') return;            // busy with another connection
+      if (invite && invite.peer === p.id && myId() < p.id) return;   // both called at once: keep ours
       if (pc) reset();
       viaPeer = p;
-      if (o.s) $('o-stun').checked = true;
+      if (o.nn) $('o-nonet').checked = true;
       const deliver = async (code) => relayPost(p.topic, await seal(p.key, { k: 'answer', from: myId(), n: o.n, ts: Date.now(), code }));
       acceptOffer(String(o.code), deliver, p.name).catch((err) => fail(String(err.message || err)));
     } else if (o.k === 'answer' && invite && invite.peer === p.id && invite.n === o.n) {
@@ -237,28 +277,33 @@ function peerListen() {
 }
 function stopPeerListen() { if (peerES) { peerES.close(); peerES = null; } }
 
-async function connectPeer(p) {
+async function connectPeer(p, auto = false) {
+  if (!auto) stopAuto();
   if (pc) reset();
   $('e-core').classList.add('hidden');
   role = 'host'; viaPeer = p;
   LANES = Math.min(8, Math.max(1, Number($('o-lanes').value) || 4));
-  pc = newPC();
-  wireChannel(pc.createDataChannel('qd', { ordered: true }));
-  await pc.setLocalDescription(await pc.createOffer());
+  const mine = pc = newPC();
+  // mark "I'm calling p" right away, so a call from p arriving meanwhile is resolved consistently
+  const my = invite = { peer: p.id, n: b64u(crypto.getRandomValues(new Uint8Array(9))) };
+  wireChannel(mine.createDataChannel('qd', { ordered: true }));
+  await mine.setLocalDescription(await mine.createOffer());
+  if (pc !== mine) return;                         // replaced meanwhile (we answered p's call instead)
   showQR(`${esc(p.name)}に接続しています…`, '相手の端末でQRDropを開いておいてください（画面がついている状態）。', false);
   $('b-scan-answer').classList.add('hidden');
   $('show-status').textContent = '';
-  await gathered(pc);
-  try { myCode = pack_sdp(pc.localDescription.sdp, true); }
+  await gathered(mine);
+  if (pc !== mine) return;
+  try { myCode = pack_sdp(mine.localDescription.sdp, true); }
   catch (e) { return fail('ネットワークが見つかりません。Wi-Fiかテザリングに接続してください。'); }
-  invite = { peer: p.id, n: b64u(crypto.getRandomValues(new Uint8Array(9))) };
   if (!peerES) peerListen();
-  await relayPost(p.topic, await seal(p.key, { k: 'offer', from: myId(), n: invite.n, ts: Date.now(), code: myCode, s: $('o-stun').checked ? 1 : 0 }));
-  const mine = pc;
+  await relayPost(p.topic, await seal(p.key, { k: 'offer', from: myId(), n: my.n, ts: Date.now(), code: myCode, nn: $('o-nonet').checked ? 1 : 0 }));
   clearTimeout(inviteTimer);
   inviteTimer = setTimeout(() => {
-    if (pc === mine && !(dc && dc.readyState === 'open')) fail(`${p.name}が見つかりませんでした。相手の端末でQRDropを開いてから、もう一度押してください。`);
-  }, 25000);
+    if (pc !== mine || (dc && dc.readyState === 'open')) return;
+    if (auto) { reset(); return; }                     // reset() schedules the next automatic try
+    fail(`${p.name}が見つかりませんでした。相手の端末でQRDropを開いてから、もう一度押してください。`);
+  }, auto ? 12000 : 25000);
 }
 
 function onConnected() {
@@ -274,6 +319,7 @@ function onConnected() {
 
 async function onHello(m) {
   peerInfo = { id: String(m.id || '').slice(0, 40), name: String(m.name || '相手').slice(0, 40) };
+  loadTuned();
   $('peer-name').textContent = `${peerInfo.name}と接続中`;
   if (viaPeer) { touchPeer(peerInfo.id, peerInfo.name).then(refreshPeersQuiet); }
   else if (role === 'host' && m.remember && $('o-remember').checked && peerInfo.id) {
@@ -282,10 +328,19 @@ async function onHello(m) {
     send({ t: 'pair', key: b64u(raw) });
     refreshPeersQuiet();
   }
+  const wasAuto = autoPeer === peerInfo.id;
+  if (wasAuto) stopAuto();
   if (resumeQueue && resumeQueue.peer === peerInfo.id && resumeQueue.files.length) {
-    $('resume-text').textContent = `前回中断したファイルが${resumeQueue.files.length}件あります`;
-    $('c-resume').classList.remove('hidden');
+    if (wasAuto || autoResumed) {
+      const q = resumeQueue;
+      setTimeout(() => { if (resumeQueue === q && !busy && !outQueue) offerFiles(q.files); }, 600);
+    } else {
+      $('resume-text').textContent = `前回中断したファイルが${resumeQueue.files.length}件あります`;
+      $('c-resume').classList.remove('hidden');
+    }
   }
+  autoResumed = false;
+  if (pendingShare && !busy) sendPendingShare();
 }
 async function onPair(m) {
   if (role !== 'guest' || !peerInfo || !$('o-remember').checked) return;
@@ -330,7 +385,46 @@ async function onLaneAnswer(m) {
   const p = extra.find((x) => x._k === m.k && !x.remoteDescription);
   if (p) await p.setRemoteDescription({ type: 'answer', sdp: String(m.sdp) });
 }
-function updLanes() { const el = $('lanes'); if (el) el.textContent = lanes.length > 1 ? `並列 ${lanes.length} 本で転送` : ''; }
+function updLanes() {
+  const el = $('lanes'); if (!el) return;
+  const used = ACTIVE ? Math.min(ACTIVE, lanes.length) : lanes.length;
+  el.textContent = lanes.length > 1 ? `並列 ${used} 本で転送${autoLanes() ? '（自動調整）' : ''}` : '';
+}
+const autoLanes = () => $('o-lanes').value === '0';
+const laneKey = () => 'qd-lanes:' + (peerInfo ? peerInfo.id : '');
+function loadTuned() {
+  ACTIVE = 0;
+  if (!autoLanes() || !peerInfo) return;
+  try { const v = JSON.parse(localStorage.getItem(laneKey()) || 'null'); if (v && Date.now() - v.t < 14 * 864e5) ACTIVE = v.k; } catch {}
+  updLanes();
+}
+function saveTuned(k) { ACTIVE = k; try { localStorage.setItem(laneKey(), JSON.stringify({ k, t: Date.now() })); } catch {} updLanes(); }
+
+// Auto-tuning: during the first seconds of a big transfer, try 1, 2 and all lanes for ~1.2 s each,
+// measure what actually drained from the send buffers, and keep the fastest (fewest lanes on a tie).
+function makeTuner() {
+  if (!autoLanes() || ACTIVE || lanes.length < 2) return null;
+  const steps = [...new Set([1, 2, lanes.length])];
+  let idx = 0, t0 = 0, d0 = 0; const rates = [];
+  const delivered = () => sentBytes - lanes.reduce((a, l) => a + l.bufferedAmount, 0);
+  return {
+    active: () => steps[idx],
+    tick() {
+      const now = performance.now();
+      if (!t0) { t0 = now; d0 = delivered(); return; }
+      if (now - t0 < 1200) return;
+      rates.push((delivered() - d0) / (now - t0));
+      idx++; t0 = now; d0 = delivered();
+      if (idx >= steps.length) {
+        const best = Math.max(...rates);
+        const k = steps[rates.findIndex((r) => r >= best * 0.93)];
+        saveTuned(k);
+        this.done = true;
+      }
+    },
+  };
+}
+let sentBytes = 0;
 
 // ------------------------------------------------------------------ scanning
 async function startScan(mode) {
@@ -397,7 +491,7 @@ async function handleCode(raw) {
   if (navigator.vibrate) navigator.vibrate(40);
   try {
     if (scanMode === 'offer') {
-      if (j.stun) $('o-stun').checked = true;
+      if (j.nonet) $('o-nonet').checked = true;
       viaPeer = null;
       await acceptOffer(txt, j.key ? (c) => relaySend(j.key, c) : null);
     } else await acceptAnswer(txt);
@@ -443,15 +537,16 @@ async function offerFiles(files) {
 function alert2(m) { const p = document.createElement('p'); p.className = 'err'; p.textContent = m; $('drop').after(p); setTimeout(() => p.remove(), 8000); }
 
 // pick the open lane with the least queued data; wait if all are full
-function pickLane() {
+function pickLane(limit) {
+  const use = limit ? lanes.slice(0, limit) : (ACTIVE ? lanes.slice(0, ACTIVE) : lanes);
   let best = null;
-  for (const l of lanes) if (l.readyState === 'open' && (!best || l.bufferedAmount < best.bufferedAmount)) best = l;
+  for (const l of use) if (l.readyState === 'open' && (!best || l.bufferedAmount < best.bufferedAmount)) best = l;
   if (!best) return Promise.reject(new Error('closed'));
   if (best.bufferedAmount < HIGH) return best;
   return new Promise((res) => {
     const hs = [];
     const done = (l) => { hs.forEach(([x, h]) => x.removeEventListener('bufferedamountlow', h)); res(l); };
-    for (const l of lanes) { const h = () => done(l); hs.push([l, h]); l.addEventListener('bufferedamountlow', h); }
+    for (const l of use) { const h = () => done(l); hs.push([l, h]); l.addEventListener('bufferedamountlow', h); }
   });
 }
 
@@ -484,6 +579,7 @@ async function sendAll(from) {
       f._t0 = performance.now(); f._base = start;
       let next = f.slice(start, start + READ).arrayBuffer();           // prefetch next slice while sending
       let stopped = false;
+      let tuner = f.size - start >= 48 * 1024 * 1024 ? makeTuner() : null;
       for (let off = start; off < f.size; off += READ) {
         const buf = new Uint8Array(await next);
         if (off + READ < f.size) next = f.slice(off + READ, off + 2 * READ).arrayBuffer();
@@ -495,8 +591,9 @@ async function sendAll(from) {
           const dv = new DataView(msg.buffer);
           dv.setUint32(0, files.batch); dv.setUint32(4, i); dv.setFloat64(8, off + p);
           msg.set(buf.subarray(p, p + n), HDR);
-          let l = pickLane(); if (l instanceof Promise) l = await l;
-          l.send(msg);
+          if (tuner) { tuner.tick(); if (tuner.done) tuner = null; }
+          let l = pickLane(tuner ? tuner.active() : 0); if (l instanceof Promise) l = await l;
+          l.send(msg); sentBytes += msg.length;
         }
         if (stopped) break;
         ui.prog(off + buf.length, f._t0, start);
@@ -527,7 +624,7 @@ function onMessage(e) {
   if (m.t === 'offer') {
     if (busy || inOffer) return send({ t: 'reject' });
     const files = (Array.isArray(m.files) ? m.files : []).slice(0, 1000).map((f) => ({
-      name: String(f.name).slice(0, 255), size: Math.max(0, Number(f.size) || 0), type: String(f.type || '').slice(0, 100),
+      name: String(f.name).slice(0, 255), size: Math.max(0, Number(f.size) || 0), type: guessType(String(f.name), String(f.type || '').slice(0, 100)),
       id: /^[0-9a-f]{32}$/.test(f.id) ? f.id : b64u(crypto.getRandomValues(new Uint8Array(16))).replace(/[^A-Za-z0-9]/g, 'x'),
     }));
     files.batch = Number(m.b) >>> 0;
@@ -535,7 +632,7 @@ function onMessage(e) {
     const total = inOffer.reduce((a, f) => a + f.size, 0);
     $('in-list').innerHTML = inOffer.map((f) => `<div class="item"><div class="body"><div class="n">${esc(f.name)}</div><div class="m">${fmt(f.size)}</div></div></div>`).join('') +
       `<p style="margin:8px 0 0">合計 ${inOffer.length} 件 · ${fmt(total)}</p>`;
-    if ($('o-auto').checked) acceptIncoming(); else $('c-incoming').classList.remove('hidden');
+    if ($('o-auto').checked || inOffer.every((f) => acceptedIds.has(f.id))) acceptIncoming(); else $('c-incoming').classList.remove('hidden');
     if (navigator.vibrate) navigator.vibrate([60, 60, 60]);
   } else if (m.t === 'accept' && outQueue && outQueue.batch === m.b) {
     sendAll(m.from || {});
@@ -665,10 +762,11 @@ async function acceptIncoming() {
   }
   const from = {};
   offer.forEach((f, i) => {
+    acceptedIds.add(f.id);
     f._from = have[f.id] || 0; from[i] = f._from;
     f._ui = addItem('↓ ' + f.name, f.size, f._from ? `続きから再開（${fmt(f._from)}受信済み）` : '待機中…');
     if (f._from) f._ui.prog(f._from, null);
-    f._ui.cancelable(() => { if (!f._fin) { send({ t: 'cancel', b: offer.batch, i }); rxStop(i, '中止しました（もう一度送ってもらうと続きから再開）'); } });
+    f._ui.cancelable(() => { if (!f._fin) { acceptedIds.delete(f.id); send({ t: 'cancel', b: offer.batch, i }); rxStop(i, '中止しました（もう一度送ってもらうと続きから再開）'); } });
   });
   send({ t: 'accept', b: offer.batch, from });
 }
@@ -756,15 +854,17 @@ function addItem(name, size, msg, file) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a'); a.href = url; a.download = fname;
       savers.push(a); updSaveAll();
-      const b1 = document.createElement('button'); b1.textContent = '保存'; b1.onclick = () => a.click();
-      acts.append(b1);
-      if (blob.size < 300 * 1024 * 1024) {        // sharing copies the file into memory on some phones
-        const file = new File([blob], fname, { type: blob.type });
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          const b2 = document.createElement('button'); b2.className = 'sec'; b2.textContent = '共有・写真に保存';
-          b2.onclick = () => navigator.share({ files: [file] }).catch(() => {});
-          acts.append(b2);
-        }
+      const file = new File([blob], fname, { type: blob.type });
+      const media = /^(image|video)\//.test(blob.type);
+      const canShare = navigator.canShare && blob.size < (IOS ? 4 * 1024 ** 3 : 300 * 1024 * 1024) && navigator.canShare({ files: [file] });
+      const share = () => navigator.share({ files: [file] }).catch(() => {});
+      const btn = (label, fn, sec) => { const b = document.createElement('button'); b.textContent = label; if (sec) b.className = 'sec'; b.onclick = fn; acts.append(b); };
+      if (IOS && media && canShare) {           // iPhone: the share sheet is how a file gets into Photos
+        btn(blob.type.startsWith('video') ? 'ビデオを保存' : '写真に保存', share);
+        btn('ファイルに保存', () => a.click(), true);
+      } else {
+        btn('保存', () => a.click());
+        if (canShare) btn('共有', share, true);
       }
     },
     wait(m) { st.textContent = `${fmt(size)} · ${m}`; },
@@ -772,9 +872,53 @@ function addItem(name, size, msg, file) {
   };
 }
 
+// ------------------------------------------------------------------ home-screen install & Android share menu
+function setupInstallHint() {
+  let dismissed = false; try { dismissed = localStorage.getItem('qd-hint-x') === '1'; } catch {}
+  if (STANDALONE || dismissed || !(IOS || ANDROID)) return;
+  $('install-text').textContent = IOS
+    ? 'Safariの共有ボタン →「ホーム画面に追加」。アプリのように開けて、つないだ端末の記憶も消えにくくなります。'
+    : 'Chromeのメニュー →「ホーム画面に追加（インストール）」。ギャラリーの共有メニューからQRDropで直接送れるようになります。';
+  $('c-install').classList.remove('hidden');
+  $('b-install-x').onclick = () => { $('c-install').classList.add('hidden'); try { localStorage.setItem('qd-hint-x', '1'); } catch {} };
+}
+// Files/links shared to QRDrop from another app (Android share menu) are parked by sw.js in IndexedDB.
+let pendingShare = null;
+function shareDB() {
+  return new Promise((res, rej) => { const r = indexedDB.open('qrdrop-share', 1); r.onupgradeneeded = () => r.result.createObjectStore('items', { keyPath: 'id' }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function takeShared() {
+  const d = await shareDB();
+  return new Promise((res) => {
+    const t = d.transaction('items', 'readwrite'), st = t.objectStore('items'), g = st.get('pending');
+    g.onsuccess = () => { st.delete('pending'); res(g.result || null); };
+    g.onerror = () => res(null);
+  });
+}
+async function loadShared() {
+  if (!new URLSearchParams(location.search).has('shared')) return;
+  history.replaceState(null, '', location.pathname);
+  let item = null; try { item = await takeShared(); } catch {}
+  if (!item || (!item.files?.length && !item.text)) return;
+  pendingShare = item;
+  const n = item.files?.length || 0, total = (item.files || []).reduce((a, f) => a + f.size, 0);
+  $('share-text').textContent = n ? `送る準備ができています：${n}件（${fmt(total)}）` : '送る準備ができています：テキスト・URL';
+  $('c-share').classList.remove('hidden');
+  $('b-share-x').onclick = () => { pendingShare = null; $('c-share').classList.add('hidden'); };
+}
+function sendPendingShare() {
+  if (!pendingShare) return;
+  const it = pendingShare; pendingShare = null; $('c-share').classList.add('hidden');
+  if (it.text) { $('t-send').value = it.text; sendText(); }
+  if (it.files?.length) setTimeout(() => offerFiles(it.files), 300);
+}
+
 // ------------------------------------------------------------------ lifecycle
 function fail(msg) { reset(msg); }
-function reset(msg) {
+// dropped: the connection went away by itself (not the user pressing 切断)
+function reset(msg, dropped = false) {
+  const pid = peerInfo && peerInfo.id;
+  const midRx = !!(inOffer && busy && inOffer.some((f) => f._ui && !f._fin));
   stopScan(); stopRelay(); clearTimeout(inviteTimer); invite = null; relayKey = null; myLink = '';
   // keep partial downloads on disk for resuming
   for (const s of rxs.values()) s.ready.then((k) => k && k.close(false));
@@ -797,6 +941,11 @@ function reset(msg) {
   if (msg) { e.textContent = msg; e.classList.remove('hidden'); } else e.classList.add('hidden');
   peerListen();
   showUsage();
+  if (dropped && pid && peers.some((p) => p.id === pid) && ((resumeQueue && resumeQueue.peer === pid) || midRx)) {
+    autoPeer = pid; autoTries = 0; autoResumed = true;
+    $('e-core').classList.add('hidden');
+  }
+  if (autoPeer) { info(`接続が切れました。自動で再接続して続きを送ります…`); scheduleAuto(); }
 }
 async function showUsage() {
   if (!canResume()) { $('st-usage').textContent = 'このブラウザでは途中からの再開は使えません（受信データはメモリに置きます）'; $('b-clear').classList.add('hidden'); return; }
@@ -822,8 +971,8 @@ async function main() {
   $('o-remember').onchange = () => { try { localStorage.setItem('qd-remember', $('o-remember').checked ? '1' : '0'); } catch {} };
   $('b-clear').onclick = async () => { await clearAll(); showUsage(); };
   refreshPeers();
-  $('b-host').onclick = () => { $('e-core').classList.add('hidden'); startHost().catch((e) => fail(String(e))); };
-  $('b-guest').onclick = () => { $('e-core').classList.add('hidden'); startScan('offer'); };
+  $('b-host').onclick = () => { stopAuto(); $('e-core').classList.add('hidden'); startHost().catch((e) => fail(String(e))); };
+  $('b-guest').onclick = () => { stopAuto(); $('e-core').classList.add('hidden'); startScan('offer'); };
   $('b-scan-answer').onclick = () => startScan('answer');
   $('b-copy').onclick = () => navigator.clipboard.writeText(myLink || myCode).then(() => { $('show-status').textContent = 'コピーしました'; }).catch(() => {});
   $('b-cancel1').onclick = $('b-cancel2').onclick = () => {
@@ -846,6 +995,11 @@ async function main() {
   };
   $('t-send').oninput = () => { const t = $('t-send'); t.style.height = '46px'; t.style.height = Math.min(160, t.scrollHeight + 2) + 'px'; };
   $('f-send').onchange = (e) => { offerFiles(e.target.files); e.target.value = ''; };
+  $('f-media').onchange = (e) => { offerFiles(e.target.files); e.target.value = ''; };
+  if (IOS) $('ios-note').classList.remove('hidden');
+  if (IOS || ANDROID) $('drop').classList.add('hidden');      // phones: no drag & drop
+  setupInstallHint();
+  loadShared();
   $('b-resume').onclick = () => { if (resumeQueue) offerFiles(resumeQueue.files); };
   const connected = () => !$('v-conn').classList.contains('hidden');
   window.addEventListener('dragover', (e) => { if (!connected()) return; e.preventDefault(); $('drop').classList.add('over'); });
@@ -878,10 +1032,10 @@ async function main() {
     if (t) { e.preventDefault(); $('t-send').value = t; $('t-send').focus(); }
   });
   $('b-reject').onclick = () => { $('c-incoming').classList.add('hidden'); inOffer = null; send({ t: 'reject' }); };
-  $('b-close').onclick = () => reset();
+  $('b-close').onclick = () => { stopAuto(); reset(); };
   // phones pause background tabs: re-listen for remembered devices when we come back
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pc) peerListen(); });
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pc) { peerListen(); if (autoPeer) { clearTimeout(autoTimer); tryAuto(); } } });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || /[?&]sw=1/.test(location.search))) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 main();
 

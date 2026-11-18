@@ -9,6 +9,9 @@
 <title>QRDrop</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="QRDrop">
 <style>
 :root{--bg:#0f172a;--card:#1e293b;--card2:#162032;--line:#334155;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--ok:#4ade80;--ng:#f87171;--r:16px}
 *{box-sizing:border-box}
@@ -90,6 +93,20 @@ details.plain summary{color:var(--mut);font-size:14px;cursor:pointer}
 .toggle{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;color:var(--mut);cursor:pointer}
 .toggle input{width:18px;height:18px;margin:0;accent-color:var(--acc)}
 
+.pick{display:grid;grid-template-columns:1.4fr 1fr;gap:10px}
+.pickbtn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:92px;border-radius:14px;border:1px solid var(--line);background:var(--card2);font-weight:600;cursor:pointer;color:var(--fg)}
+.pickbtn svg{width:28px;height:28px;color:var(--acc)}
+.pickbtn.main{background:var(--acc);color:#0b1220;border-color:var(--acc)}
+.pickbtn.main svg{color:#0b1220}
+.pickbtn:active{transform:scale(.99)}
+.drop{min-height:0;flex-direction:row;padding:12px;margin-top:10px;gap:10px}
+.drop svg{width:22px;height:22px}
+@media (pointer:coarse){.drop{display:none}}
+.note{font-size:12.5px;color:var(--mut);margin:12px 0 0;padding-top:10px;border-top:1px solid var(--line)}
+.info{color:var(--acc);font-size:14px;margin:8px 0 0}
+.hint{display:flex;gap:10px;align-items:flex-start;border-color:var(--acc)}
+.hint .t{flex:1;font-size:14px}.hint .t small{display:block;color:var(--mut);font-size:12.5px;margin-top:2px}
+.hint button{flex:none}
 /* transfer items */
 .item{display:flex;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
 .item:first-child{border-top:0;padding-top:2px}
@@ -122,6 +139,10 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
 
   <!-- HOME -->
   <section id="v-home">
+    <div class="card hint hidden" id="c-share">
+      <div class="t"><b id="share-text"></b><small>つないだことのある端末の名前を押すか、「接続を開始」でつなぐと自動で送ります</small></div>
+      <button class="sec sm" id="b-share-x" aria-label="取り消す">×</button>
+    </div>
     <div class="card hidden" id="c-peers">
       <h2>つないだことのある端末</h2>
       <div id="peer-list"></div>
@@ -140,14 +161,19 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
     </div>
     <details class="card">
       <summary>詳細設定</summary>
-      <label class="opt"><span class="t">別のネットワーク同士でも試す<small>STUNで経路だけ調べます。データは端末間で直接のまま。オフのときは同じWi-Fiかテザリングで使えます</small></span><input type="checkbox" id="o-stun"></label>
-      <label class="opt"><span class="t">並列接続数<small>「接続を開始」側の設定が使われます。転送後の速度を見て一番速い本数を選んでください</small></span>
-        <select id="o-lanes"><option value="1">1本</option><option value="2">2本</option><option value="4" selected>4本</option><option value="6">6本</option></select></label>
+      <label class="opt"><span class="t">インターネットを使わない<small>同じWi-Fi・テザリング専用にします。オフ（標準）のときは、つながりやすくするため、外部のSTUNサーバーに自分のアドレスを一度だけ問い合わせます。ファイルはどちらでも端末どうしで直接送ります</small></span><input type="checkbox" id="o-nonet"></label>
+      <label class="opt"><span class="t">並列接続数<small>「自動」なら、大きな転送の最初の数秒で一番速い本数を測って、相手ごとに覚えます</small></span>
+        <select id="o-lanes"><option value="0" selected>自動</option><option value="1">1本</option><option value="2">2本</option><option value="4">4本</option></select></label>
       <label class="opt"><span class="t">この端末の名前<small>相手の画面の「つないだことのある端末」に出る名前です</small></span><input id="o-name" maxlength="40" class="txtin"></label>
       <label class="opt"><span class="t">つないだ端末を記憶する<small>次回から名前を押すだけでつながります。合鍵はこの端末の中にだけ保存されます</small></span><input type="checkbox" id="o-remember" checked></label>
       <div class="opt"><span class="t"><span id="st-usage">受信データの一時保存：確認中…</span><small>途中で切れたファイルを続きから受け取るために保存しています</small></span><button class="sec sm hidden" id="b-clear">削除</button></div>
     </details>
+    <p class="info hidden" id="i-core"></p>
     <p class="err hidden" id="e-core"></p>
+    <div class="card hint hidden" id="c-install">
+      <div class="t"><b id="install-title">ホーム画面に追加すると便利です</b><small id="install-text"></small></div>
+      <button class="sec sm" id="b-install-x" aria-label="閉じる">×</button>
+    </div>
   </section>
 
   <!-- SHOW QR -->
@@ -196,17 +222,22 @@ a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;backg
       <button class="sm" id="b-resume">続きを送る</button>
     </div>
     <div class="card">
-      <label class="drop" id="drop" for="f-send">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0-5 5m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-        <b>ファイルを選んで送る</b>
-        <small>タップで選択（複数OK）<br>PCはドラッグ＆ドロップ・Ctrl+Vでも</small>
-      </label>
+      <div class="pick">
+        <label class="pickbtn main" for="f-media"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="m21 15-5-5L5 21"/></svg>写真・動画</label>
+        <label class="pickbtn" for="f-send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>ファイル</label>
+      </div>
+      <input type="file" id="f-media" multiple accept="image/*,video/*" class="hidden">
       <input type="file" id="f-send" multiple class="hidden">
+      <div class="drop" id="drop">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0-5 5m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <small>ここにドラッグ＆ドロップ・Ctrl+Vで貼り付けても送れます</small>
+      </div>
       <div class="sendtext">
         <textarea id="t-send" rows="1" placeholder="URLやテキストを送る"></textarea>
         <button id="b-text" class="sec">送信</button>
       </div>
       <label class="toggle"><input type="checkbox" id="o-auto"> この接続中は確認なしで受け取る</label>
+      <p class="note hidden" id="ios-note">iPhoneは画面を消したりアプリを切り替えたりすると通信が止まります。止まっても、戻れば自動でつなぎ直して続きから送ります。</p>
     </div>
     <div class="card hidden" id="c-incoming">
       <h2>受け取りリクエスト</h2>
