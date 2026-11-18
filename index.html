@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://ntfy.sh; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0f172a">
@@ -27,10 +27,11 @@ button:disabled{opacity:.45}
 .row{display:flex;gap:10px}.row>*{flex:1}
 .stack>*+*{margin-top:10px}
 .hidden{display:none!important}
-.qr{background:#fff;border-radius:12px;padding:8px;width:min(82vw,340px);margin:6px auto 12px}
+.qr{background:#fff;border-radius:12px;padding:8px;width:min(82vw,380px);margin:6px auto 12px}
 .qr svg{display:block;width:100%;height:auto}
 .step{display:inline-block;background:var(--acc);color:#0b1220;border-radius:99px;font-size:12px;font-weight:700;padding:1px 9px;margin-right:6px}
 video{width:100%;border-radius:12px;background:#000;aspect-ratio:1/1;object-fit:cover}
+video.mirror{transform:scaleX(-1)}
 .scanbox{position:relative}
 .scanbox:after{content:"";position:absolute;inset:18%;border:3px solid var(--acc);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.25)}
 textarea{width:100%;min-height:72px;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px;font:12px ui-monospace,monospace}
@@ -49,6 +50,8 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
 .item.done .bar i{background:var(--ok)}
 .item.err .bar i{background:var(--ng)}
 .acts{display:flex;gap:8px;margin-top:6px}.acts button{padding:9px;font-size:14px}
+.txt{white-space:pre-wrap;font-weight:400;margin:4px 0}
+a.btn{display:block;flex:1;text-align:center;text-decoration:none;border-radius:12px;padding:9px;font-size:14px;font-weight:600;background:var(--acc);color:#0b1220}
 .err{color:var(--ng);font-size:14px;margin:6px 0 0}
 .foot{color:var(--mut);font-size:12px;text-align:center;margin-top:20px}
 .lock{color:var(--ok)}
@@ -57,7 +60,7 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
 <body>
 <main>
   <h1>QR<span>Drop</span></h1>
-  <p class="sub">スマホ同士でQRを見せ合うだけ。サーバーを通らず、端末間で直接暗号化して送ります。</p>
+  <p class="sub">スマホ・PCどうしで、QRを1回読むだけ。サーバーを通らず、端末間で直接暗号化して送ります。</p>
 
   <!-- HOME -->
   <section id="v-home">
@@ -66,8 +69,12 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
       <p>もう1台は「QRを読み取る」を押してください。送信・受信はつながった後どちらからでもできます。</p>
       <div class="stack">
         <button id="b-host">接続を開始（QRを表示）</button>
-        <button id="b-guest" class="sec">QRを読み取る</button>
+        <button id="b-guest" class="sec">アプリ内でQRを読み取る</button>
       </div>
+    </div>
+    <div class="card">
+      <h2>PCとつなぐとき（Webカメラ不要）</h2>
+      <p style="margin:0">① PCで「接続を開始」→ ② スマホの標準カメラでPCのQRを読む → 自動でつながります。QRを読むのはスマホの1回だけです（スマホ同士でも同じです）。<br>どちらかがネットにつながっていない時だけ、スマホに出たQRをPCで読み取ってください。</p>
     </div>
     <div class="card">
       <label class="tog"><input type="checkbox" id="o-stun"> 別のネットワーク同士でも試す（STUNで経路探索・データはP2Pのまま）</label>
@@ -86,7 +93,7 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
       <p id="show-desc"></p>
       <div class="qr" id="show-qr"></div>
       <div class="stack">
-        <button id="b-scan-answer" class="hidden">相手のQRを読み取る</button>
+        <button id="b-scan-answer" class="sec hidden">（ネット未接続時）相手に出たQRを読み取る</button>
         <button class="sec" id="b-copy">コードをコピー（カメラが使えない時）</button>
         <button class="sec" id="b-cancel1">やめる</button>
       </div>
@@ -100,6 +107,7 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
       <h2 id="scan-title">相手のQRを読み取る</h2>
       <div class="scanbox"><video id="cam" playsinline muted></video></div>
       <p class="status" id="scan-status">カメラを起動しています…</p>
+      <p class="status" style="margin-top:2px">相手の画面を明るくして、10〜20cmの距離でかざしてください</p>
       <div class="stack" style="margin-top:12px">
         <button class="sec" id="b-img">スクリーンショットから読み取る</button>
         <input type="file" id="f-img" accept="image/*" class="hidden">
@@ -122,8 +130,12 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
     </div>
     <div class="card">
       <h2>送る</h2>
-      <label class="drop" id="drop" for="f-send">タップしてファイルを選ぶ（複数OK）</label>
+      <label class="drop" id="drop" for="f-send">タップしてファイルを選ぶ（複数OK）<br><small>PCならここにドラッグ＆ドロップ</small></label>
       <input type="file" id="f-send" multiple class="hidden">
+      <div class="stack" style="margin-top:12px">
+        <textarea id="t-send" placeholder="URLやテキストを送る（PCで送るならCtrl+Enter）"></textarea>
+        <button class="sec" id="b-text">テキスト・URLを送る</button>
+      </div>
     </div>
     <div class="card hidden" id="c-incoming">
       <h2>受け取りリクエスト</h2>
@@ -137,7 +149,7 @@ select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-ra
     <button class="sec" id="b-close">切断する</button>
   </section>
 
-  <p class="foot">WebRTC (DTLS 1.2+ / SCTP) で暗号化 · 改ざん検知 BLAKE3 · QR処理・検証は Rust/WebAssembly<br>ファイルはこのサイトのサーバーを一切通りません · <a href="https://github.com/daichingale/qrdrop" style="color:var(--acc)">ソースコード</a></p>
+  <p class="foot">接続時の返事だけ、暗号化して中継（ntfy.sh）を通ります。鍵はQRの中にしかないため、中継側は中身を読めません。<br>WebRTC (DTLS 1.2+ / SCTP) で暗号化 · 改ざん検知 BLAKE3 · QR処理・検証は Rust/WebAssembly<br>ファイルはこのサイトのサーバーを一切通りません · <a href="https://github.com/daichingale/qrdrop" style="color:var(--acc)">ソースコード</a></p>
 </main>
 <script type="module" src="app.js"></script>
 </body>

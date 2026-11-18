@@ -59,33 +59,54 @@ async function startHost() {
   pc = newPC();
   wireChannel(pc.createDataChannel('qd', { ordered: true }));
   await pc.setLocalDescription(await pc.createOffer());
-  showQR('<span class="step">1</span>相手にこのQRを読み取ってもらう', '相手の画面にQRが出たら、下のボタンでそれを読み取ってください。');
+  showQR('<span class="step">1</span>このQRを相手のスマホで読み取る', 'スマホの標準カメラで読み取れます。読み取られると自動でつながります。');
   $('show-status').textContent = '接続情報を準備中…';
   await gathered(pc);
   try { myCode = pack_sdp(pc.localDescription.sdp, true); }
   catch (e) { return fail('ネットワークが見つかりません。Wi-Fiかテザリングに接続してください。'); }
-  renderQR(myCode);
-  $('show-status').textContent = '';
+  relayKey = crypto.getRandomValues(new Uint8Array(16));
+  myLink = joinUrl(myCode, relayKey);
+  renderQR(myLink);
+  $('show-status').textContent = '相手の読み取りを待っています…';
+  $('b-copy').textContent = '参加用リンクをコピー（メッセージで送る場合）';
   $('b-scan-answer').classList.remove('hidden');
+  relayListen(relayKey).catch(() => {
+    $('show-status').textContent = 'ネットにつながっていないため自動接続は使えません。相手に出たQRを下のボタンで読み取ってください。';
+  });
 }
 
-async function acceptOffer(code) {
+async function acceptOffer(code, key) {
   role = 'guest';
   pc = newPC();
   pc.ondatachannel = (e) => wireChannel(e.channel);
   await pc.setRemoteDescription({ type: 'offer', sdp: unpack_sdp(code) });
   await pc.setLocalDescription(await pc.createAnswer());
-  showQR('<span class="step">2</span>このQRを相手に読み取ってもらう', '読み取られると自動でつながります。');
+  showQR('<span class="step">2</span>つないでいます…', '');
   $('b-scan-answer').classList.add('hidden');
+  $('b-copy').textContent = 'コードをコピー（カメラが使えない時）';
   $('show-status').textContent = '接続情報を準備中…';
   await gathered(pc);
   try { myCode = pack_sdp(pc.localDescription.sdp, false); }
   catch (e) { return fail('ネットワークが見つかりません。Wi-Fiかテザリングに接続してください。'); }
+  myLink = myCode;
+  if (key) {
+    try {
+      await relaySend(key, myCode);
+      $('show-desc').textContent = '相手に自動で返事を送りました。数秒でつながります。つながらない時だけ、このQRを相手に読み取ってもらってください。';
+      $('show-status').textContent = '';
+      renderQR(myCode);
+      return;
+    } catch { /* fall through to manual QR */ }
+  }
+  $('show-title').innerHTML = '<span class="step">2</span>このQRを相手に読み取ってもらう';
+  $('show-desc').textContent = (key ? '自動送信できませんでした（ネット未接続など）。' : '') + '相手が「相手のQRを読み取る」でこのQRを読むとつながります。';
   renderQR(myCode);
   $('show-status').textContent = '相手の読み取りを待っています…';
 }
 
 async function acceptAnswer(code) {
+  if (!pc || pc.remoteDescription) return;
+  stopRelay();
   await pc.setRemoteDescription({ type: 'answer', sdp: unpack_sdp(code) });
   show('show');
   $('show-status').textContent = 'つないでいます…';
@@ -99,8 +120,65 @@ function showQR(title, desc) {
 }
 function renderQR(text) { $('show-qr').innerHTML = qr_svg(text); }
 
+// The code and the one-time key ride in the URL fragment (#…), which browsers never send to any server.
+function b64u(bytes) { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function unb64u(s) { const b = atob(s.replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, (c) => c.charCodeAt(0)); }
+function joinUrl(code, key) {
+  return location.origin + location.pathname + '#c=' + encodeURIComponent(code) + '&k=' + b64u(key) + ($('o-stun').checked ? '&s=1' : '');
+}
+function parseJoin(txt) {
+  txt = String(txt || '').trim();
+  const i = txt.indexOf('#c=');
+  if (i < 0) return { code: txt, key: null, stun: false };
+  const p = new URLSearchParams(txt.slice(i + 1));
+  let key = null;
+  try { const k = unb64u(p.get('k') || ''); if (k.length === 16) key = k; } catch {}
+  return { code: p.get('c') || '', key, stun: p.get('s') === '1' };
+}
+
+// ------------------------------------------------------------------ encrypted relay for the reply
+// Lets a PC without a camera get the phone's reply automatically. The relay (ntfy.sh, a public
+// pub/sub service) only ever sees AES-GCM ciphertext under a key that exists solely inside the QR
+// code, on a random topic. It cannot read, alter or forge the reply; at worst it can drop it, and
+// then the manual QR fallback still works. File data never goes through it.
+const RELAY = location.hostname === 'localhost' ? location.origin + '/relay' : 'https://ntfy.sh';
+let relayKey = null, relayES = null, myLink = '';
+async function relayTopic(key) {
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', key));
+  return 'qrdrop-' + [...h.slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+async function aesKey(key) { return crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt', 'decrypt']); }
+const AAD = new TextEncoder().encode('qrdrop-answer-v1');
+async function relaySend(key, code) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: AAD }, await aesKey(key), new TextEncoder().encode(code)));
+  const body = new Uint8Array(12 + ct.length); body.set(iv); body.set(ct, 12);
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 6000);
+  const r = await fetch(`${RELAY}/${await relayTopic(key)}`, { method: 'POST', body: b64u(body), signal: ctl.signal, referrerPolicy: 'no-referrer', credentials: 'omit', cache: 'no-store' });
+  clearTimeout(t);
+  if (!r.ok) throw new Error('relay ' + r.status);
+}
+async function relayListen(key) {
+  stopRelay();
+  if (!navigator.onLine) throw new Error('offline');
+  const k = await aesKey(key);
+  const es = new EventSource(`${RELAY}/${await relayTopic(key)}/sse?since=all`);
+  relayES = es;
+  es.onmessage = async (e) => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.event && msg.event !== 'message') return;
+    try {
+      const b = unb64u(String(msg.message || ''));
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12), additionalData: AAD }, k, b.slice(12));
+      const code = new TextDecoder().decode(pt);
+      if (packed_kind(code) === 'answer') await acceptAnswer(code);
+    } catch { /* not ours / tampered: ignore */ }
+  };
+}
+function stopRelay() { if (relayES) { relayES.close(); relayES = null; } }
+
 function onConnected() {
-  stopScan();
+  stopScan(); stopRelay();
   try { $('safety').textContent = safety_code(pc.localDescription.sdp, pc.remoteDescription.sdp); } catch { $('safety').textContent = '---'; }
   show('conn');
   if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
@@ -158,6 +236,8 @@ async function startScan(mode) {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false });
     const v = $('cam'); v.srcObject = stream; await v.play();
+    const fm = stream.getVideoTracks()[0].getSettings().facingMode;
+    v.classList.toggle('mirror', fm !== 'environment');
     $('scan-status').textContent = 'QRを枠に合わせてください';
     loop();
   } catch (e) {
@@ -170,10 +250,18 @@ async function decodeFrom(src, w, h) {
   if (detector) {
     try { const r = await detector.detect(src); if (r.length) return r[0].rawValue; } catch {}
   }
+  // pass 1: whole frame, scaled down to 720 px (fast)
   const s = Math.min(1, 720 / Math.max(w, h));
   cvs.width = Math.round(w * s); cvs.height = Math.round(h * s);
   ctx.drawImage(src, 0, 0, cvs.width, cvs.height);
-  const d = ctx.getImageData(0, 0, cvs.width, cvs.height);
+  let d = ctx.getImageData(0, 0, cvs.width, cvs.height);
+  let r = qr_decode_rgba(d.data, cvs.width, cvs.height);
+  if (r || s === 1) return r;
+  // pass 2: centre square at (near) full resolution, for a phone held far from a webcam
+  const side = Math.round(Math.min(w, h) * 0.75), k = Math.min(1, 720 / side);
+  cvs.width = cvs.height = Math.round(side * k);
+  ctx.drawImage(src, (w - side) / 2, (h - side) / 2, side, side, 0, 0, cvs.width, cvs.height);
+  d = ctx.getImageData(0, 0, cvs.width, cvs.height);
   return qr_decode_rgba(d.data, cvs.width, cvs.height);
 }
 async function loop() {
@@ -190,7 +278,8 @@ function stopScan() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null;
 }
-async function handleCode(txt) {
+async function handleCode(raw) {
+  const j = parseJoin(raw), txt = j.code;
   let kind;
   try { kind = packed_kind(txt); } catch { return false; }
   if (kind !== scanMode) {
@@ -199,7 +288,7 @@ async function handleCode(txt) {
   }
   stopScan();
   if (navigator.vibrate) navigator.vibrate(40);
-  try { scanMode === 'offer' ? await acceptOffer(txt) : await acceptAnswer(txt); }
+  try { if (scanMode === 'offer') { if (j.stun) $('o-stun').checked = true; await acceptOffer(txt, j.key); } else await acceptAnswer(txt); }
   catch (e) { fail('コードを読み込めませんでした: ' + (e.message || e)); }
   return true;
 }
@@ -304,6 +393,8 @@ function onMessage(e) {
     else f._ui.err('相手側で検証に失敗しました');
     if (f._acked) return; f._acked = true;
     if ((sending._acks = (sending._acks || 0) + 1) >= sending.length) { sending = null; busy = false; }
+  } else if (m.t === 'text') {
+    showText(String(m.v || '').slice(0, 100000));
   } else if (m.t === 'lane-offer') {
     onLaneOffer(m).catch(() => {});
   } else if (m.t === 'lane-answer') {
@@ -358,6 +449,35 @@ function tryFinish(i, s) {
   if (++rxDone >= inOffer.length) { inOffer = null; rxDone = 0; busy = false; }
 }
 
+function sendText() {
+  const v = $('t-send').value.trim();
+  if (!v || !dc || dc.readyState !== 'open') return;
+  send({ t: 'text', v: v.slice(0, 100000) });
+  $('t-send').value = '';
+  textItem('↑ 送ったテキスト', v, false);
+}
+function showText(v) {
+  textItem('↓ 受け取ったテキスト', v, true);
+  if (navigator.vibrate) navigator.vibrate(60);
+}
+function textItem(label, v, incoming) {
+  $('c-xfer').classList.remove('hidden');
+  const el = document.createElement('div');
+  el.className = 'item done';
+  el.innerHTML = `<div class="m">${esc(label)}</div><div class="n txt"></div><div class="acts"></div>`;
+  el.querySelector('.txt').textContent = v;
+  const acts = el.querySelector('.acts');
+  const url = /^https?:\/\/\S+$/i.test(v) ? v : null;
+  if (url && incoming) {
+    const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.className = 'btn'; a.textContent = '開く'; acts.append(a);
+  }
+  const b = document.createElement('button'); b.className = 'sec'; b.textContent = 'コピー';
+  b.onclick = () => navigator.clipboard.writeText(v).then(() => { b.textContent = 'コピーしました'; }).catch(() => {});
+  acts.append(b);
+  $('xfer').prepend(el);
+}
+
 function addItem(name, size, msg) {
   const el = document.createElement('div');
   el.className = 'item';
@@ -391,7 +511,7 @@ function addItem(name, size, msg) {
 // ------------------------------------------------------------------ lifecycle
 function fail(msg) { reset(msg); }
 function reset(msg) {
-  stopScan();
+  stopScan(); stopRelay(); relayKey = null; myLink = '';
   try { dc && dc.close(); } catch {}
   try { pc && pc.close(); } catch {}
   for (const p of extra) { try { p.close(); } catch {} }
@@ -410,7 +530,7 @@ async function main() {
   $('b-host').onclick = () => { $('e-core').classList.add('hidden'); startHost().catch((e) => fail(String(e))); };
   $('b-guest').onclick = () => { $('e-core').classList.add('hidden'); startScan('offer'); };
   $('b-scan-answer').onclick = () => startScan('answer');
-  $('b-copy').onclick = () => navigator.clipboard.writeText(myCode).then(() => { $('show-status').textContent = 'コピーしました'; }).catch(() => {});
+  $('b-copy').onclick = () => navigator.clipboard.writeText(myLink || myCode).then(() => { $('show-status').textContent = 'コピーしました'; }).catch(() => {});
   $('b-cancel1').onclick = $('b-cancel2').onclick = () => {
     if (role === 'host' && scanMode === 'answer' && !$('v-scan').classList.contains('hidden')) { stopScan(); show('show'); return; }
     reset();
@@ -425,7 +545,24 @@ async function main() {
     await handleCode(txt);
   };
   $('b-paste').onclick = async () => { const t = $('t-paste').value.trim(); if (!(await handleCode(t))) scanErr('コードが正しくありません'); };
+  $('b-text').onclick = sendText;
+  $('t-send').onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendText(); };
   $('f-send').onchange = (e) => { offerFiles(e.target.files); e.target.value = ''; };
+  const connected = () => !$('v-conn').classList.contains('hidden');
+  window.addEventListener('dragover', (e) => { if (!connected()) return; e.preventDefault(); $('drop').classList.add('over'); });
+  window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) $('drop').classList.remove('over'); });
+  window.addEventListener('drop', (e) => {
+    if (!connected()) return;
+    e.preventDefault(); $('drop').classList.remove('over');
+    const fs = [...(e.dataTransfer?.files || [])].filter((f) => f.size > 0 || f.type);  // folders show up as size-0 untyped entries
+    if (fs.length) offerFiles(fs); else alert2('フォルダはそのまま送れません。中のファイルを選んでください');
+  });
+  if (location.hash.startsWith('#c=')) {
+    const link = location.hash;
+    history.replaceState(null, '', location.pathname);
+    scanMode = 'offer';
+    handleCode(link).then((ok) => { if (!ok) reset('QRのコードが正しくありません'); });
+  }
   $('b-accept').onclick = () => {
     $('c-incoming').classList.add('hidden'); $('c-xfer').classList.remove('hidden');
     busy = true;
@@ -439,4 +576,4 @@ async function main() {
 main();
 
 // test hook (used by automated tests only)
-window.__qd = { setLanes: (n) => { $('o-lanes').innerHTML += `<option value="${n}">${n}</option>`; $('o-lanes').value = String(n); }, lanes: () => lanes.length, startHost, acceptOffer: (c) => acceptOffer(c), acceptAnswer: (c) => acceptAnswer(c), code: () => myCode, offerFiles, qr_svg, qr_decode_rgba };
+window.__qd = { sendText, decodeFrom, setLanes: (n) => { $('o-lanes').innerHTML += `<option value="${n}">${n}</option>`; $('o-lanes').value = String(n); }, lanes: () => lanes.length, startHost, acceptOffer: (c) => acceptOffer(c), acceptAnswer: (c) => acceptAnswer(c), code: () => myCode, offerFiles, qr_svg, qr_decode_rgba };
