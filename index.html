@@ -36,6 +36,7 @@ video{width:100%;border-radius:12px;background:#000;aspect-ratio:1/1;object-fit:
 textarea{width:100%;min-height:72px;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px;font:12px ui-monospace,monospace}
 label.tog{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--mut)}
 label.tog input{width:20px;height:20px}
+select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:14px}
 .status{font-size:14px;color:var(--mut);text-align:center;margin:8px 0 0}
 .code{font:700 30px ui-monospace,monospace;letter-spacing:.08em;text-align:center;color:var(--ok);margin:4px 0}
 .drop{border:2px dashed var(--line);border-radius:14px;padding:22px;text-align:center;color:var(--mut)}
@@ -70,6 +71,9 @@ label.tog input{width:20px;height:20px}
     </div>
     <div class="card">
       <label class="tog"><input type="checkbox" id="o-stun"> 別のネットワーク同士でも試す（STUNで経路探索・データはP2Pのまま）</label>
+      <label class="tog" style="margin-top:12px">並列接続数
+        <select id="o-lanes"><option value="1">1本</option><option value="2">2本</option><option value="4" selected>4本（標準）</option><option value="6">6本</option></select></label>
+      <p style="margin:8px 0 0">本数は「接続を開始」側の設定が使われます。転送後に速度が表示されるので、実機で一番速い本数を選んでください。</p>
       <p style="margin:8px 0 0">オフのときは同じWi-Fi、またはテザリングで1台に相乗りしている状態で使えます（インターネット不要）。</p>
     </div>
     <p class="err hidden" id="e-core"></p>
@@ -114,6 +118,7 @@ label.tog input{width:20px;height:20px}
       <h2><span class="lock">●</span> 接続しました</h2>
       <p>2台の画面に同じ数字が出ていれば、間に誰も割り込んでいません。</p>
       <div class="code" id="safety"></div>
+      <p class="status" id="lanes"></p>
     </div>
     <div class="card">
       <h2>送る</h2>
