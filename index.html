@@ -10,79 +10,126 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
-:root{--bg:#0f172a;--card:#1e293b;--line:#334155;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--ok:#4ade80;--ng:#f87171}
+:root{--bg:#0f172a;--card:#1e293b;--card2:#162032;--line:#334155;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--ok:#4ade80;--ng:#f87171;--r:16px}
 *{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-tap-highlight-color:transparent}
-main{max-width:520px;margin:0 auto;padding:20px 16px 48px}
-h1{font-size:26px;margin:4px 0 2px;letter-spacing:.02em}
+main{max-width:560px;margin:0 auto;padding:20px 16px calc(40px + env(safe-area-inset-bottom))}
+header{display:flex;align-items:center;gap:12px;margin:4px 0 18px}
+header img{width:40px;height:40px;border-radius:10px}
+h1{font-size:24px;line-height:1.1;margin:0;letter-spacing:.02em}
 h1 span{color:var(--acc)}
-.sub{color:var(--mut);font-size:14px;margin:0 0 20px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:0 0 14px}
-.card h2{font-size:17px;margin:0 0 6px}
+.sub{color:var(--mut);font-size:13px;margin:2px 0 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin:0 0 12px}
+.card h2{font-size:16px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.card h2 .grow{flex:1}
 .card p{margin:0 0 12px;color:var(--mut);font-size:14px}
-button{appearance:none;border:0;border-radius:12px;padding:14px 16px;font:inherit;font-weight:600;width:100%;cursor:pointer;background:var(--acc);color:#0b1220}
+.card p:last-child{margin-bottom:0}
+button{appearance:none;border:0;border-radius:12px;padding:14px 16px;font:inherit;font-weight:600;width:100%;cursor:pointer;background:var(--acc);color:#0b1220;line-height:1.3}
 button.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}
-button.ng{background:var(--ng);color:#1a0b0b}
-button:disabled{opacity:.45}
+button.sm{width:auto;padding:7px 12px;font-size:13px;border-radius:9px}
+button:disabled{opacity:.45;cursor:default}
+button:active{transform:scale(.99)}
 .row{display:flex;gap:10px}.row>*{flex:1}
 .stack>*+*{margin-top:10px}
 .hidden{display:none!important}
-.qr{background:#fff;border-radius:12px;padding:8px;width:min(82vw,380px);margin:6px auto 12px}
+.err{color:var(--ng);font-size:14px;margin:8px 0 0}
+.status{font-size:14px;color:var(--mut);text-align:center;margin:10px 0 0}
+
+/* home */
+.steps{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:8px}
+.steps li{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:var(--mut)}
+.steps b{flex:none;width:22px;height:22px;border-radius:50%;background:var(--card2);border:1px solid var(--line);color:var(--fg);font-size:12px;display:grid;place-items:center;margin-top:1px}
+details.card summary{cursor:pointer;font-weight:600;font-size:15px;list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary:after{content:"＋";color:var(--mut)}
+details.card[open] summary:after{content:"－"}
+.opt{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-top:1px solid var(--line);font-size:14px}
+details.card .opt:first-of-type{margin-top:12px}
+.opt .t{flex:1}.opt .t small{display:block;color:var(--mut);font-size:12.5px;margin-top:2px}
+.opt input[type=checkbox]{width:20px;height:20px;margin:2px 0 0;accent-color:var(--acc)}
+select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:14px}
+
+/* QR / scan */
+.qr{background:#fff;border-radius:14px;padding:10px;width:min(80vw,360px);margin:4px auto 14px}
 .qr svg{display:block;width:100%;height:auto}
-.step{display:inline-block;background:var(--acc);color:#0b1220;border-radius:99px;font-size:12px;font-weight:700;padding:1px 9px;margin-right:6px}
-video{width:100%;border-radius:12px;background:#000;aspect-ratio:1/1;object-fit:cover}
+.step{display:inline-grid;place-items:center;width:22px;height:22px;background:var(--acc);color:#0b1220;border-radius:50%;font-size:12px;font-weight:700;flex:none}
+video{width:100%;border-radius:12px;background:#000;aspect-ratio:1/1;object-fit:cover;display:block}
 video.mirror{transform:scaleX(-1)}
-.scanbox{position:relative}
-.scanbox:after{content:"";position:absolute;inset:18%;border:3px solid var(--acc);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.25)}
-textarea{width:100%;min-height:72px;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px;font:12px ui-monospace,monospace}
-label.tog{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--mut)}
-label.tog input{width:20px;height:20px}
-select{background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:14px}
-.status{font-size:14px;color:var(--mut);text-align:center;margin:8px 0 0}
-.code{font:700 30px ui-monospace,monospace;letter-spacing:.08em;text-align:center;color:var(--ok);margin:4px 0}
-.drop{border:2px dashed var(--line);border-radius:14px;padding:22px;text-align:center;color:var(--mut)}
-.item{border-top:1px solid var(--line);padding:10px 0}
-.item:first-child{border-top:0}
-.item .n{font-weight:600;word-break:break-all}
-.item .m{font-size:13px;color:var(--mut)}
-.bar{height:8px;background:#0b1220;border-radius:99px;overflow:hidden;margin:6px 0 2px}
-.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
+.scanbox{position:relative;border-radius:12px;overflow:hidden}
+.scanbox:after{content:"";position:absolute;inset:16%;border:3px solid var(--acc);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.3)}
+textarea{display:block;width:100%;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font:inherit;font-size:15px;resize:vertical}
+textarea:focus,select:focus{outline:2px solid var(--acc);outline-offset:1px}
+#t-paste{font:12px ui-monospace,monospace;min-height:72px}
+details.plain summary{color:var(--mut);font-size:14px;cursor:pointer}
+
+/* connected */
+.conn{display:flex;align-items:center;gap:12px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px rgba(74,222,128,.15);flex:none}
+.conn .t{flex:1;min-width:0}
+.conn .t b{display:block;font-size:16px}
+.conn .t small{display:block;color:var(--mut);font-size:12.5px}
+.code{font:700 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;color:var(--ok);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;white-space:nowrap}
+.drop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%;min-height:132px;padding:18px;border:2px dashed var(--line);border-radius:14px;text-align:center;color:var(--fg);cursor:pointer;background:var(--card2);transition:border-color .15s,background .15s}
+.drop svg{width:34px;height:34px;color:var(--acc)}
+.drop b{font-size:16px}
+.drop small{color:var(--mut);font-size:13px}
+.drop:hover,.drop.over{border-color:var(--acc);background:#0b1220}
+.sendtext{display:flex;gap:8px;align-items:stretch;margin-top:12px}
+.sendtext textarea{flex:1;min-height:46px;height:46px;resize:none}
+.sendtext button{width:auto;flex:none;padding:0 16px}
+.toggle{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;color:var(--mut);cursor:pointer}
+.toggle input{width:18px;height:18px;margin:0;accent-color:var(--acc)}
+
+/* transfer items */
+.item{display:flex;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.item:first-child{border-top:0;padding-top:2px}
+.thumb{flex:none;width:52px;height:52px;border-radius:10px;background:var(--card2) center/cover no-repeat;border:1px solid var(--line);display:grid;place-items:center;color:var(--mut);font-size:11px;font-weight:700;overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover}
+.body{flex:1;min-width:0}
+.item .n{font-weight:600;font-size:15px;word-break:break-all;line-height:1.35}
+.item .m{font-size:12.5px;color:var(--mut);margin-top:2px}
+.item .txt{white-space:pre-wrap;font-weight:400;margin-top:2px}
+.bar{height:6px;background:var(--card2);border-radius:99px;overflow:hidden;margin:7px 0 2px}
+.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
 .item.done .bar i{background:var(--ok)}
 .item.err .bar i{background:var(--ng)}
-.acts{display:flex;gap:8px;margin-top:6px}.acts button{padding:9px;font-size:14px}
-.txt{white-space:pre-wrap;font-weight:400;margin:4px 0}
-a.btn{display:block;flex:1;text-align:center;text-decoration:none;border-radius:12px;padding:9px;font-size:14px;font-weight:600;background:var(--acc);color:#0b1220}
-.err{color:var(--ng);font-size:14px;margin:6px 0 0}
-.foot{color:var(--mut);font-size:12px;text-align:center;margin-top:20px}
-.lock{color:var(--ok)}
+.item.err .m{color:var(--ng)}
+.acts{display:flex;gap:8px;margin-top:8px}
+.acts:empty{display:none}
+.acts button,.acts a.btn{flex:1;padding:9px;font-size:14px;border-radius:10px}
+a.btn{display:block;text-align:center;text-decoration:none;font-weight:600;background:var(--acc);color:#0b1220}
+.foot{color:var(--mut);font-size:12px;text-align:center;margin-top:18px;line-height:1.7}
+.foot a{color:var(--acc)}
+@media (min-width:900px){main{max-width:600px;padding-top:40px}}
 </style>
 </head>
 <body>
 <main>
-  <h1>QR<span>Drop</span></h1>
-  <p class="sub">スマホ・PCどうしで、QRを1回読むだけ。サーバーを通らず、端末間で直接暗号化して送ります。</p>
+  <header>
+    <img src="icon.svg" alt="">
+    <div><h1>QR<span>Drop</span></h1><p class="sub">QRを1回読むだけで、端末どうしを直接つなぐ</p></div>
+  </header>
 
   <!-- HOME -->
   <section id="v-home">
     <div class="card">
-      <h2>どちらか1台で「接続を開始」</h2>
-      <p>もう1台は「QRを読み取る」を押してください。送信・受信はつながった後どちらからでもできます。</p>
       <div class="stack">
         <button id="b-host">接続を開始（QRを表示）</button>
         <button id="b-guest" class="sec">アプリ内でQRを読み取る</button>
       </div>
+      <ol class="steps">
+        <li><b>1</b><span>どちらか1台（PCならPC）で「接続を開始」</span></li>
+        <li><b>2</b><span>もう1台のスマホの標準カメラでQRを読む</span></li>
+        <li><b>3</b><span>自動でつながります。送信・受信はどちらからでもOK</span></li>
+      </ol>
     </div>
-    <div class="card">
-      <h2>PCとつなぐとき（Webカメラ不要）</h2>
-      <p style="margin:0">① PCで「接続を開始」→ ② スマホの標準カメラでPCのQRを読む → 自動でつながります。QRを読むのはスマホの1回だけです（スマホ同士でも同じです）。<br>どちらかがネットにつながっていない時だけ、スマホに出たQRをPCで読み取ってください。</p>
-    </div>
-    <div class="card">
-      <label class="tog"><input type="checkbox" id="o-stun"> 別のネットワーク同士でも試す（STUNで経路探索・データはP2Pのまま）</label>
-      <label class="tog" style="margin-top:12px">並列接続数
-        <select id="o-lanes"><option value="1">1本</option><option value="2">2本</option><option value="4" selected>4本（標準）</option><option value="6">6本</option></select></label>
-      <p style="margin:8px 0 0">本数は「接続を開始」側の設定が使われます。転送後に速度が表示されるので、実機で一番速い本数を選んでください。</p>
-      <p style="margin:8px 0 0">オフのときは同じWi-Fi、またはテザリングで1台に相乗りしている状態で使えます（インターネット不要）。</p>
-    </div>
+    <details class="card">
+      <summary>詳細設定</summary>
+      <label class="opt"><span class="t">別のネットワーク同士でも試す<small>STUNで経路だけ調べます。データは端末間で直接のまま。オフのときは同じWi-Fiかテザリングで使えます</small></span><input type="checkbox" id="o-stun"></label>
+      <label class="opt"><span class="t">並列接続数<small>「接続を開始」側の設定が使われます。転送後の速度を見て一番速い本数を選んでください</small></span>
+        <select id="o-lanes"><option value="1">1本</option><option value="2">2本</option><option value="4" selected>4本</option><option value="6">6本</option></select></label>
+    </details>
     <p class="err hidden" id="e-core"></p>
   </section>
 
@@ -94,7 +141,7 @@ a.btn{display:block;flex:1;text-align:center;text-decoration:none;border-radius:
       <div class="qr" id="show-qr"></div>
       <div class="stack">
         <button id="b-scan-answer" class="sec hidden">（ネット未接続時）相手に出たQRを読み取る</button>
-        <button class="sec" id="b-copy">コードをコピー（カメラが使えない時）</button>
+        <button class="sec" id="b-copy">コードをコピー</button>
         <button class="sec" id="b-cancel1">やめる</button>
       </div>
       <p class="status" id="show-status"></p>
@@ -107,12 +154,12 @@ a.btn{display:block;flex:1;text-align:center;text-decoration:none;border-radius:
       <h2 id="scan-title">相手のQRを読み取る</h2>
       <div class="scanbox"><video id="cam" playsinline muted></video></div>
       <p class="status" id="scan-status">カメラを起動しています…</p>
-      <p class="status" style="margin-top:2px">相手の画面を明るくして、10〜20cmの距離でかざしてください</p>
+      <p class="status" style="margin-top:2px;font-size:12.5px">相手の画面を明るくして、10〜20cmの距離でかざしてください</p>
       <div class="stack" style="margin-top:12px">
         <button class="sec" id="b-img">スクリーンショットから読み取る</button>
         <input type="file" id="f-img" accept="image/*" class="hidden">
-        <details><summary style="color:var(--mut);font-size:14px">コードを貼り付ける</summary>
-          <div class="stack" style="margin-top:8px"><textarea id="t-paste" placeholder="QD1|…"></textarea><button class="sec" id="b-paste">このコードで接続</button></div>
+        <details class="plain"><summary>コードを貼り付ける</summary>
+          <div class="stack" style="margin-top:8px"><textarea id="t-paste" placeholder="QD1|… または参加用リンク"></textarea><button class="sec" id="b-paste">このコードで接続</button></div>
         </details>
         <button class="sec" id="b-cancel2">やめる</button>
       </div>
@@ -122,34 +169,37 @@ a.btn{display:block;flex:1;text-align:center;text-decoration:none;border-radius:
 
   <!-- CONNECTED -->
   <section id="v-conn" class="hidden">
-    <div class="card">
-      <h2><span class="lock">●</span> 接続しました</h2>
-      <p>2台の画面に同じ数字が出ていれば、間に誰も割り込んでいません。</p>
+    <div class="card conn">
+      <span class="dot"></span>
+      <div class="t"><b>接続中</b><small>相手と同じ数字なら安全</small><small id="lanes"></small></div>
       <div class="code" id="safety"></div>
-      <p class="status" id="lanes"></p>
     </div>
     <div class="card">
-      <h2>送る</h2>
-      <label class="drop" id="drop" for="f-send">タップしてファイルを選ぶ（複数OK）<br><small>PCならここにドラッグ＆ドロップ</small></label>
+      <label class="drop" id="drop" for="f-send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0-5 5m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <b>ファイルを選んで送る</b>
+        <small>タップで選択（複数OK）<br>PCはドラッグ＆ドロップ・Ctrl+Vでも</small>
+      </label>
       <input type="file" id="f-send" multiple class="hidden">
-      <div class="stack" style="margin-top:12px">
-        <textarea id="t-send" placeholder="URLやテキストを送る（PCで送るならCtrl+Enter）"></textarea>
-        <button class="sec" id="b-text">テキスト・URLを送る</button>
+      <div class="sendtext">
+        <textarea id="t-send" rows="1" placeholder="URLやテキストを送る"></textarea>
+        <button id="b-text" class="sec">送信</button>
       </div>
+      <label class="toggle"><input type="checkbox" id="o-auto"> この接続中は確認なしで受け取る</label>
     </div>
     <div class="card hidden" id="c-incoming">
       <h2>受け取りリクエスト</h2>
       <div id="in-list"></div>
-      <div class="row" style="margin-top:10px"><button id="b-accept">受け取る</button><button class="sec" id="b-reject">断る</button></div>
+      <div class="row" style="margin-top:12px"><button id="b-accept">受け取る</button><button class="sec" id="b-reject">断る</button></div>
     </div>
     <div class="card hidden" id="c-xfer">
-      <h2>転送</h2>
+      <h2><span class="grow">履歴</span><button class="sec sm hidden" id="b-saveall">すべて保存</button></h2>
       <div id="xfer"></div>
     </div>
     <button class="sec" id="b-close">切断する</button>
   </section>
 
-  <p class="foot">接続時の返事だけ、暗号化して中継（ntfy.sh）を通ります。鍵はQRの中にしかないため、中継側は中身を読めません。<br>WebRTC (DTLS 1.2+ / SCTP) で暗号化 · 改ざん検知 BLAKE3 · QR処理・検証は Rust/WebAssembly<br>ファイルはこのサイトのサーバーを一切通りません · <a href="https://github.com/daichingale/qrdrop" style="color:var(--acc)">ソースコード</a></p>
+  <p class="foot">ファイルは端末どうしで直接・暗号化して送信。サーバーには保存されません。<br><a href="https://github.com/daichingale/qrdrop#仕組み">仕組みとソースコード</a></p>
 </main>
 <script type="module" src="app.js"></script>
 </body>

@@ -223,7 +223,7 @@ async function onLaneAnswer(m) {
   const p = extra.find((x) => x._k === m.k && !x.remoteDescription);
   if (p) await p.setRemoteDescription({ type: 'answer', sdp: String(m.sdp) });
 }
-function updLanes() { const el = $('lanes'); if (el) el.textContent = lanes.length > 1 ? `並列 ${lanes.length} 本で高速転送` : ''; }
+function updLanes() { const el = $('lanes'); if (el) el.textContent = lanes.length > 1 ? `並列 ${lanes.length} 本で転送` : ''; }
 
 // ------------------------------------------------------------------ scanning
 async function startScan(mode) {
@@ -315,7 +315,7 @@ function offerFiles(files) {
   if (!outQueue.length) return;
   send({ t: 'offer', files: outQueue.map((f) => ({ name: f.name, size: f.size, type: f.type })) });
   $('c-xfer').classList.remove('hidden');
-  for (const f of outQueue) f._ui = addItem('↑ ' + f.name, f.size, '相手の承認待ち…');
+  for (const f of outQueue) f._ui = addItem('↑ ' + f.name, f.size, '相手の承認待ち…', f);
 }
 
 function alert2(m) { const p = document.createElement('p'); p.className = 'err'; p.textContent = m; $('drop').after(p); setTimeout(() => p.remove(), 3000); }
@@ -376,7 +376,7 @@ function onMessage(e) {
     const total = inOffer.reduce((a, f) => a + f.size, 0);
     $('in-list').innerHTML = inOffer.map((f) => `<div class="item"><div class="n">${esc(f.name)}</div><div class="m">${fmt(f.size)}</div></div>`).join('') +
       `<p style="margin:8px 0 0">合計 ${inOffer.length} 件 · ${fmt(total)}</p>`;
-    $('c-incoming').classList.remove('hidden');
+    if ($('o-auto').checked) acceptIncoming(); else $('c-incoming').classList.remove('hidden');
     if (navigator.vibrate) navigator.vibrate([60, 60, 60]);
   } else if (m.t === 'accept' && outQueue) {
     sendAll();
@@ -449,6 +449,14 @@ function tryFinish(i, s) {
   if (++rxDone >= inOffer.length) { inOffer = null; rxDone = 0; busy = false; }
 }
 
+function acceptIncoming() {
+  if (!inOffer) return;
+  $('c-incoming').classList.add('hidden'); $('c-xfer').classList.remove('hidden');
+  busy = true;
+  for (const f of inOffer) f._ui = addItem('↓ ' + f.name, f.size, '待機中…');
+  send({ t: 'accept' });
+}
+
 function sendText() {
   const v = $('t-send').value.trim();
   if (!v || !dc || dc.readyState !== 'open') return;
@@ -460,11 +468,24 @@ function showText(v) {
   textItem('↓ 受け取ったテキスト', v, true);
   if (navigator.vibrate) navigator.vibrate(60);
 }
+function fileBadge(name) {
+  const m = /\.([a-z0-9]{1,5})$/i.exec(name);
+  return m ? m[1].toUpperCase() : 'FILE';
+}
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec < 0) return '';
+  if (sec < 60) return `残り${Math.max(1, Math.round(sec))}秒`;
+  return `残り${Math.floor(sec / 60)}分${Math.round(sec % 60)}秒`;
+}
+let savers = [];   // download links of received files, for "save all"
+function updSaveAll() { $('b-saveall').classList.toggle('hidden', savers.length < 2); }
+
 function textItem(label, v, incoming) {
   $('c-xfer').classList.remove('hidden');
   const el = document.createElement('div');
   el.className = 'item done';
-  el.innerHTML = `<div class="m">${esc(label)}</div><div class="n txt"></div><div class="acts"></div>`;
+  el.innerHTML = `<div class="thumb">${incoming ? '↓' : '↑'}</div><div class="body"><div class="m"></div><div class="n txt"></div><div class="acts"></div></div>`;
+  el.querySelector('.m').textContent = label;
   el.querySelector('.txt').textContent = v;
   const acts = el.querySelector('.acts');
   const url = /^https?:\/\/\S+$/i.test(v) ? v : null;
@@ -478,22 +499,37 @@ function textItem(label, v, incoming) {
   $('xfer').prepend(el);
 }
 
-function addItem(name, size, msg) {
+function addItem(name, size, msg, file) {
+  $('c-xfer').classList.remove('hidden');
   const el = document.createElement('div');
   el.className = 'item';
-  el.innerHTML = `<div class="n">${esc(name)}</div><div class="bar"><i></i></div><div class="m">${fmt(size)} · <span>${esc(msg)}</span></div><div class="acts"></div>`;
+  el.innerHTML = `<div class="thumb"></div><div class="body"><div class="n"></div><div class="bar"><i></i></div><div class="m"></div><div class="acts"></div></div>`;
+  el.querySelector('.n').textContent = name;
+  const th = el.querySelector('.thumb');
+  const setThumb = (blob) => {
+    if (blob && /^image\/(png|jpe?g|gif|webp|avif|bmp)$/i.test(blob.type) && blob.size < 50 * 1024 * 1024) {
+      const img = document.createElement('img'); img.alt = ''; img.onerror = () => { img.remove(); th.textContent = fileBadge(name); }; img.src = URL.createObjectURL(blob); th.textContent = ''; th.append(img);
+    } else th.textContent = fileBadge(name);
+  };
+  setThumb(file);
+  const st = el.querySelector('.m'); st.textContent = `${fmt(size)} · ${msg}`;
   $('xfer').prepend(el);
-  const bar = el.querySelector('i'), st = el.querySelector('span'), acts = el.querySelector('.acts');
+  const bar = el.querySelector('i'), acts = el.querySelector('.acts');
   return {
     prog(n, t0) {
       bar.style.width = (size ? (n / size) * 100 : 100).toFixed(1) + '%';
-      if (t0) { const s = (performance.now() - t0) / 1000; st.textContent = `${fmt(n)} / ${fmt(size)} · ${s > 0.2 ? fmt(n / s) + '/s' : ''}`; }
+      if (t0) {
+        const s = (performance.now() - t0) / 1000, rate = n / s;
+        st.textContent = s > 0.3 ? `${fmt(n)} / ${fmt(size)} · ${fmt(rate)}/s · ${fmtTime((size - n) / rate)}` : `${fmt(n)} / ${fmt(size)}`;
+      }
     },
     ok(m, blob, fname) {
-      el.classList.add('done'); bar.style.width = '100%'; st.textContent = m;
+      el.classList.add('done'); bar.style.width = '100%'; st.textContent = `${fmt(size)} · ${m}`;
       if (!blob) return;
+      setThumb(blob);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a'); a.href = url; a.download = fname;
+      savers.push(a); updSaveAll();
       const b1 = document.createElement('button'); b1.textContent = '保存'; b1.onclick = () => a.click();
       acts.append(b1);
       const file = new File([blob], fname, { type: blob.type });
@@ -503,8 +539,8 @@ function addItem(name, size, msg) {
         acts.append(b2);
       }
     },
-    wait(m) { st.textContent = m; },
-    err(m) { el.classList.add('err'); st.textContent = m; },
+    wait(m) { st.textContent = `${fmt(size)} · ${m}`; },
+    err(m) { el.classList.add('err'); st.textContent = `${fmt(size)} · ${m}`; },
   };
 }
 
@@ -515,6 +551,8 @@ function reset(msg) {
   try { dc && dc.close(); } catch {}
   try { pc && pc.close(); } catch {}
   for (const p of extra) { try { p.close(); } catch {} }
+  for (const a of savers) URL.revokeObjectURL(a.href);
+  savers = []; updSaveAll(); $('o-auto').checked = false;
   extra = []; lanes = [];
   pc = dc = null; role = null; outQueue = inOffer = sending = null; rxs = new Map(); rxDone = 0; busy = false;
   $('xfer').innerHTML = ''; $('c-xfer').classList.add('hidden'); $('c-incoming').classList.add('hidden');
@@ -546,7 +584,10 @@ async function main() {
   };
   $('b-paste').onclick = async () => { const t = $('t-paste').value.trim(); if (!(await handleCode(t))) scanErr('コードが正しくありません'); };
   $('b-text').onclick = sendText;
-  $('t-send').onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendText(); };
+  $('t-send').onkeydown = (e) => {
+    if (e.key === 'Enter' && !e.isComposing && (e.ctrlKey || e.metaKey || (!e.shiftKey && matchMedia('(pointer:fine)').matches))) { e.preventDefault(); sendText(); }
+  };
+  $('t-send').oninput = () => { const t = $('t-send'); t.style.height = '46px'; t.style.height = Math.min(160, t.scrollHeight + 2) + 'px'; };
   $('f-send').onchange = (e) => { offerFiles(e.target.files); e.target.value = ''; };
   const connected = () => !$('v-conn').classList.contains('hidden');
   window.addEventListener('dragover', (e) => { if (!connected()) return; e.preventDefault(); $('drop').classList.add('over'); });
@@ -557,18 +598,27 @@ async function main() {
     const fs = [...(e.dataTransfer?.files || [])].filter((f) => f.size > 0 || f.type);  // folders show up as size-0 untyped entries
     if (fs.length) offerFiles(fs); else alert2('フォルダはそのまま送れません。中のファイルを選んでください');
   });
-  if (location.hash.startsWith('#c=')) {
+  // join links: on first load, and when the page is already open and only the #… part changes
+  const joinFromHash = () => {
+    if (!location.hash.startsWith('#c=')) return;
     const link = location.hash;
     history.replaceState(null, '', location.pathname);
+    if (pc) reset();
     scanMode = 'offer';
     handleCode(link).then((ok) => { if (!ok) reset('QRのコードが正しくありません'); });
-  }
-  $('b-accept').onclick = () => {
-    $('c-incoming').classList.add('hidden'); $('c-xfer').classList.remove('hidden');
-    busy = true;
-    for (const f of inOffer) f._ui = addItem('↓ ' + f.name, f.size, '待機中…');
-    send({ t: 'accept' });
   };
+  window.addEventListener('hashchange', joinFromHash);
+  joinFromHash();
+  $('b-accept').onclick = acceptIncoming;
+  $('b-saveall').onclick = async () => { for (const a of savers) { a.click(); await new Promise((r) => setTimeout(r, 350)); } };
+  // PC: Ctrl+V a screenshot or copied file to send it; pasted text goes into the text box
+  document.addEventListener('paste', (e) => {
+    if ($('v-conn').classList.contains('hidden') || e.target === $('t-send')) return;
+    const fs = [...(e.clipboardData?.files || [])];
+    if (fs.length) { e.preventDefault(); offerFiles(fs); return; }
+    const t = e.clipboardData?.getData('text');
+    if (t) { e.preventDefault(); $('t-send').value = t; $('t-send').focus(); }
+  });
   $('b-reject').onclick = () => { $('c-incoming').classList.add('hidden'); inOffer = null; send({ t: 'reject' }); };
   $('b-close').onclick = () => reset();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
