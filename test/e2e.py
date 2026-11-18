@@ -3,7 +3,8 @@ from playwright.async_api import async_playwright
 WEB = sys.argv[1]; SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 50_000_000
 LANES = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 QUIET = "-q" in sys.argv
-srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "-d", WEB], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "server.py"), WEB, "8765"])
+NORELAY = os.environ.get("NORELAY") == "1"
 time.sleep(1)
 data = os.urandom(SIZE); open("/tmp/big.bin", "wb").write(data)
 async def main():
@@ -15,7 +16,7 @@ async def main():
         A = await ctx.new_page(); B = await ctx2.new_page()  # separate browser processes, like two phones
         for pg, n in ((A, "A"), (B, "B")):
             pg.on("pageerror", lambda e, n=n: print(n, "ERR:", e))
-            await pg.goto("http://localhost:8765/"); await pg.wait_for_function("window.__qd")
+        await A.goto("http://localhost:8765/"); await A.wait_for_function("window.__qd")
         await A.evaluate(f"__qd.setLanes({LANES})")
         await A.click("#b-host")
         await A.wait_for_selector("#show-qr svg", timeout=10000)
@@ -29,12 +30,23 @@ async def main():
           x.drawImage(img, 0, 0, 600, 600); const d = x.getImageData(0,0,600,600);
           return __qd.qr_decode_rgba(d.data, 600, 600);
         }""")
-        print("QR decode matches:", dec == offer)
-        await B.evaluate("c => __qd.acceptOffer(c)", dec)
+        print("QR is join URL:", dec.startswith("http://localhost:8765/#c="), "| decoded by Rust (no BarcodeDetector)")
+        # B = a phone opening the URL from its normal camera app
+        await B.goto(dec); await B.wait_for_function("window.__qd")
+        print("B URL hash cleared:", await B.evaluate("location.hash") == "")
         await B.wait_for_function("__qd.code().startsWith('QD1|A')", timeout=10000)
         ans = await B.evaluate("__qd.code()")
-        await A.evaluate("c => __qd.acceptAnswer(c)", ans)
+        if NORELAY:
+            # offline: A = a PC without a webcam pastes the code that came from the phone
+            await A.click("#b-scan-answer"); await A.click("details summary")
+            await A.fill("#t-paste", ans); await A.click("#b-paste")
+            print("relay down -> manual fallback used")
+        else:
+            print("auto-connect via encrypted relay (A did nothing)")
         await A.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
+        if not NORELAY:
+            log = open("/tmp/relay_log.txt").read()
+            print("relay saw plaintext SDP/IP/fingerprint?:", any(x in log for x in ("QD1", "192.", "candidate", ans[:20])), "| bytes:", len(log.strip()))
         await B.wait_for_selector("#v-conn:not(.hidden)", timeout=15000)
         await A.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
         await B.wait_for_function(f"__qd.lanes() >= {LANES}", timeout=15000)
@@ -58,6 +70,9 @@ async def main():
         await A.wait_for_function("document.querySelectorAll('#xfer .item.done').length === 3", timeout=20000)
         await B.wait_for_function("document.querySelectorAll('#xfer .item.done').length === 4", timeout=20000)
         print("reverse 3 files OK:", [await e.text_content() for e in await A.query_selector_all("#xfer .item .m")])
+        await A.fill("#t-send", "https://example.com/テスト?q=1"); await A.click("#b-text")
+        await B.wait_for_selector("#xfer a.btn", timeout=5000)
+        print("text/URL received:", await B.get_attribute("#xfer a.btn", "href"), "| rel:", await B.get_attribute("#xfer a.btn", "rel"))
         await b.close()
 try: asyncio.run(main())
 finally: srv.terminate()
