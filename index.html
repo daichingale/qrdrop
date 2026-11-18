@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f172a">
+<title>QRDrop</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--line:#334155;--fg:#e2e8f0;--mut:#94a3b8;--acc:#38bdf8;--ok:#4ade80;--ng:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;-webkit-tap-highlight-color:transparent}
+main{max-width:520px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:26px;margin:4px 0 2px;letter-spacing:.02em}
+h1 span{color:var(--acc)}
+.sub{color:var(--mut);font-size:14px;margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:0 0 14px}
+.card h2{font-size:17px;margin:0 0 6px}
+.card p{margin:0 0 12px;color:var(--mut);font-size:14px}
+button{appearance:none;border:0;border-radius:12px;padding:14px 16px;font:inherit;font-weight:600;width:100%;cursor:pointer;background:var(--acc);color:#0b1220}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.ng{background:var(--ng);color:#1a0b0b}
+button:disabled{opacity:.45}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.stack>*+*{margin-top:10px}
+.hidden{display:none!important}
+.qr{background:#fff;border-radius:12px;padding:8px;width:min(82vw,340px);margin:6px auto 12px}
+.qr svg{display:block;width:100%;height:auto}
+.step{display:inline-block;background:var(--acc);color:#0b1220;border-radius:99px;font-size:12px;font-weight:700;padding:1px 9px;margin-right:6px}
+video{width:100%;border-radius:12px;background:#000;aspect-ratio:1/1;object-fit:cover}
+.scanbox{position:relative}
+.scanbox:after{content:"";position:absolute;inset:18%;border:3px solid var(--acc);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.25)}
+textarea{width:100%;min-height:72px;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px;font:12px ui-monospace,monospace}
+label.tog{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--mut)}
+label.tog input{width:20px;height:20px}
+.status{font-size:14px;color:var(--mut);text-align:center;margin:8px 0 0}
+.code{font:700 30px ui-monospace,monospace;letter-spacing:.08em;text-align:center;color:var(--ok);margin:4px 0}
+.drop{border:2px dashed var(--line);border-radius:14px;padding:22px;text-align:center;color:var(--mut)}
+.item{border-top:1px solid var(--line);padding:10px 0}
+.item:first-child{border-top:0}
+.item .n{font-weight:600;word-break:break-all}
+.item .m{font-size:13px;color:var(--mut)}
+.bar{height:8px;background:#0b1220;border-radius:99px;overflow:hidden;margin:6px 0 2px}
+.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
+.item.done .bar i{background:var(--ok)}
+.item.err .bar i{background:var(--ng)}
+.acts{display:flex;gap:8px;margin-top:6px}.acts button{padding:9px;font-size:14px}
+.err{color:var(--ng);font-size:14px;margin:6px 0 0}
+.foot{color:var(--mut);font-size:12px;text-align:center;margin-top:20px}
+.lock{color:var(--ok)}
+</style>
+</head>
+<body>
+<main>
+  <h1>QR<span>Drop</span></h1>
+  <p class="sub">スマホ同士でQRを見せ合うだけ。サーバーを通らず、端末間で直接暗号化して送ります。</p>
+
+  <!-- HOME -->
+  <section id="v-home">
+    <div class="card">
+      <h2>どちらか1台で「接続を開始」</h2>
+      <p>もう1台は「QRを読み取る」を押してください。送信・受信はつながった後どちらからでもできます。</p>
+      <div class="stack">
+        <button id="b-host">接続を開始（QRを表示）</button>
+        <button id="b-guest" class="sec">QRを読み取る</button>
+      </div>
+    </div>
+    <div class="card">
+      <label class="tog"><input type="checkbox" id="o-stun"> 別のネットワーク同士でも試す（STUNで経路探索・データはP2Pのまま）</label>
+      <p style="margin:8px 0 0">オフのときは同じWi-Fi、またはテザリングで1台に相乗りしている状態で使えます（インターネット不要）。</p>
+    </div>
+    <p class="err hidden" id="e-core"></p>
+  </section>
+
+  <!-- SHOW QR -->
+  <section id="v-show" class="hidden">
+    <div class="card">
+      <h2 id="show-title"></h2>
+      <p id="show-desc"></p>
+      <div class="qr" id="show-qr"></div>
+      <div class="stack">
+        <button id="b-scan-answer" class="hidden">相手のQRを読み取る</button>
+        <button class="sec" id="b-copy">コードをコピー（カメラが使えない時）</button>
+        <button class="sec" id="b-cancel1">やめる</button>
+      </div>
+      <p class="status" id="show-status"></p>
+    </div>
+  </section>
+
+  <!-- SCAN -->
+  <section id="v-scan" class="hidden">
+    <div class="card">
+      <h2 id="scan-title">相手のQRを読み取る</h2>
+      <div class="scanbox"><video id="cam" playsinline muted></video></div>
+      <p class="status" id="scan-status">カメラを起動しています…</p>
+      <div class="stack" style="margin-top:12px">
+        <button class="sec" id="b-img">スクリーンショットから読み取る</button>
+        <input type="file" id="f-img" accept="image/*" class="hidden">
+        <details><summary style="color:var(--mut);font-size:14px">コードを貼り付ける</summary>
+          <div class="stack" style="margin-top:8px"><textarea id="t-paste" placeholder="QD1|…"></textarea><button class="sec" id="b-paste">このコードで接続</button></div>
+        </details>
+        <button class="sec" id="b-cancel2">やめる</button>
+      </div>
+      <p class="err hidden" id="e-scan"></p>
+    </div>
+  </section>
+
+  <!-- CONNECTED -->
+  <section id="v-conn" class="hidden">
+    <div class="card">
+      <h2><span class="lock">●</span> 接続しました</h2>
+      <p>2台の画面に同じ数字が出ていれば、間に誰も割り込んでいません。</p>
+      <div class="code" id="safety"></div>
+    </div>
+    <div class="card">
+      <h2>送る</h2>
+      <label class="drop" id="drop" for="f-send">タップしてファイルを選ぶ（複数OK）</label>
+      <input type="file" id="f-send" multiple class="hidden">
+    </div>
+    <div class="card hidden" id="c-incoming">
+      <h2>受け取りリクエスト</h2>
+      <div id="in-list"></div>
+      <div class="row" style="margin-top:10px"><button id="b-accept">受け取る</button><button class="sec" id="b-reject">断る</button></div>
+    </div>
+    <div class="card hidden" id="c-xfer">
+      <h2>転送</h2>
+      <div id="xfer"></div>
+    </div>
+    <button class="sec" id="b-close">切断する</button>
+  </section>
+
+  <p class="foot">WebRTC (DTLS 1.2+ / SCTP) で暗号化 · 改ざん検知 BLAKE3 · QR処理・検証は Rust/WebAssembly<br>ファイルはこのサイトのサーバーを一切通りません · <a href="https://github.com/daichingale/qrdrop" style="color:var(--acc)">ソースコード</a></p>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
